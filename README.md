@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🍽️ Restaurant BI v2.0 - Prospecção Inteligente
 
 Sistema de mapeamento de restaurantes com cruzamento Receita Federal × Google Maps.
@@ -54,3 +55,7 @@ pip install -r requirements.txt
 playwright install chromium
 python main.py
 ```
+=======
+# Hacking-restaurant-b2b
+Hacking-restaurant-b2b - Prospecção Inteligente  Sistema de mapeamento de restaurantes com cruzamento Receita Federal × Google Maps para geração de leads b2b.
+>>>>>>> 28dd1262100a16aced64bb714d082c1ea3f598ea
