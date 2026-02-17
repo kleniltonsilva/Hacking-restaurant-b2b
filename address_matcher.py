@@ -19,12 +19,15 @@ POR QUE FUNCIONA:
   - No Google Maps:     "R. Pres. Carlos Cavalcanti, 1222"
   - Após normalização:  "rua presidente carlos cavalcanti 1222" = MATCH
 """
+import json
 import re
 import sqlite3
 import unicodedata
+from collections import defaultdict
 from difflib import SequenceMatcher
 
 from config import DB_PATH
+from logger import log
 
 
 # ============================================================
@@ -320,6 +323,7 @@ def cruzar_restaurante_com_receita(restaurante: dict, cnpjs_receita: list) -> di
             "email": melhor_match.get("email", ""),
             "telefone1": melhor_match.get("telefone1", ""),
             "telefone2": melhor_match.get("telefone2", ""),
+            "telefone_proprietario": melhor_match.get("telefone_proprietario", ""),
             "capital_social": melhor_match.get("capital_social", 0),
             "porte": melhor_match.get("porte", ""),
             "natureza_juridica": melhor_match.get("natureza_juridica", ""),
@@ -331,6 +335,9 @@ def cruzar_restaurante_com_receita(restaurante: dict, cnpjs_receita: list) -> di
             "logradouro_receita": melhor_match.get("logradouro", ""),
             "numero_receita": melhor_match.get("numero", ""),
             "bairro_receita": melhor_match.get("bairro", ""),
+            "tem_ifood_receita": melhor_match.get("tem_ifood", 0),
+            "ifood_nome_receita": melhor_match.get("ifood_nome", ""),
+            "ifood_url_receita": melhor_match.get("ifood_url", ""),
         }
 
     return {}
@@ -370,15 +377,15 @@ def cruzar_cidade_completa(cidade: str, uf: str) -> dict:
         cnpjs = [dict(c) for c in cnpjs]
 
         if not restaurantes:
-            print(f"[MATCH] Todos os restaurantes de {cidade}/{uf} já têm CNPJ.")
+            log.info(f"[MATCH] Todos os restaurantes de {cidade}/{uf} já têm CNPJ.")
             return {"total": 0, "matched": 0, "sem_match": 0}
 
         if not cnpjs:
-            print(f"[MATCH] ⚠️ Nenhum CNPJ da Receita para {cidade}/{uf}.")
-            print(f"        Execute primeiro: Coleta Base Receita (opção A do menu)")
+            log.warning(f"[MATCH] ⚠️ Nenhum CNPJ da Receita para {cidade}/{uf}.")
+            log.warning(f"        Execute primeiro: Coleta Base Receita (opção A do menu)")
             return {"total": len(restaurantes), "matched": 0, "sem_match": len(restaurantes)}
 
-        print(f"[MATCH] 🔄 Cruzando {len(restaurantes)} restaurantes × {len(cnpjs)} CNPJs...")
+        log.info(f"[MATCH] 🔄 Cruzando {len(restaurantes)} restaurantes × {len(cnpjs)} CNPJs...")
 
         matched = 0
         sem_match = 0
@@ -395,6 +402,11 @@ def cruzar_cidade_completa(cidade: str, uf: str) -> dict:
                 import json
                 socios_data = resultado.get("socios_json", "[]")
 
+                # Propagar iFood da Receita se o restaurante ainda não tem
+                tem_ifood_rec = resultado.get("tem_ifood_receita", 0)
+                ifood_nome_rec = resultado.get("ifood_nome_receita", "")
+                ifood_url_rec = resultado.get("ifood_url_receita", "")
+
                 conn.execute("""
                     UPDATE restaurantes SET
                         cnpj = ?,
@@ -406,10 +418,14 @@ def cruzar_cidade_completa(cidade: str, uf: str) -> dict:
                         capital_social = ?,
                         email_receita = ?,
                         telefones_receita = ?,
+                        telefone_proprietario = ?,
                         porte_empresa = ?,
                         simples = ?,
                         mei = ?,
                         score_confianca = ?,
+                        tem_ifood = CASE WHEN tem_ifood = 0 THEN ? ELSE tem_ifood END,
+                        ifood_nome = CASE WHEN ifood_nome IS NULL OR ifood_nome = '' THEN ? ELSE ifood_nome END,
+                        ifood_url = CASE WHEN ifood_url IS NULL OR ifood_url = '' THEN ? ELSE ifood_url END,
                         status = 'enriquecido',
                         data_atualizacao = CURRENT_TIMESTAMP
                     WHERE id = ?
@@ -422,10 +438,14 @@ def cruzar_cidade_completa(cidade: str, uf: str) -> dict:
                     resultado["capital_social"],
                     resultado["email"],
                     "|".join(filter(None, [resultado.get("telefone1", ""), resultado.get("telefone2", "")])),
+                    resultado.get("telefone_proprietario", ""),
                     resultado["porte"],
                     resultado["simples"],
                     resultado["mei"],
                     resultado["score"],
+                    tem_ifood_rec,
+                    ifood_nome_rec,
+                    ifood_url_rec,
                     rest["id"],
                 ))
 
@@ -459,7 +479,7 @@ def cruzar_cidade_completa(cidade: str, uf: str) -> dict:
                 matched += 1
 
                 log_score = f"{'🟢' if resultado['score'] >= 0.8 else '🟡'}"
-                print(f"  {log_score} ({i+1}/{len(restaurantes)}) "
+                log.info(f"  {log_score} ({i+1}/{len(restaurantes)}) "
                       f"{rest['nome'][:30]:30s} → {resultado['cnpj']} "
                       f"(score: {resultado['score']:.2f}) "
                       f"| {resultado['razao_social'][:30]}")
@@ -467,7 +487,7 @@ def cruzar_cidade_completa(cidade: str, uf: str) -> dict:
             else:
                 sem_match += 1
                 if (i + 1) % 50 == 0:
-                    print(f"  ⏳ ({i+1}/{len(restaurantes)}) processados... "
+                    log.info(f"  ⏳ ({i+1}/{len(restaurantes)}) processados... "
                           f"{matched} matches, {sem_match} sem match")
 
         conn.commit()
@@ -482,12 +502,77 @@ def cruzar_cidade_completa(cidade: str, uf: str) -> dict:
         "taxa": f"{(matched/len(restaurantes)*100):.1f}%" if restaurantes else "0%",
     }
 
-    print(f"\n[MATCH] ═══ RESULTADO DO CRUZAMENTO {cidade}/{uf} ═══")
-    print(f"  Restaurantes processados: {stats['total']}")
-    print(f"  🟢 Com CNPJ encontrado:   {stats['matched']} ({stats['taxa']})")
-    print(f"  🔴 Sem match:             {stats['sem_match']}")
+    log.info(f"[MATCH] ═══ RESULTADO DO CRUZAMENTO {cidade}/{uf} ═══")
+    log.info(f"  Restaurantes processados: {stats['total']}")
+    log.info(f"  🟢 Com CNPJ encontrado:   {stats['matched']} ({stats['taxa']})")
+    log.info(f"  🔴 Sem match:             {stats['sem_match']}")
 
     return stats
+
+
+# ============================================================
+# DETECÇÃO DE SÓCIOS MULTI-RESTAURANTE
+# ============================================================
+
+def detectar_multi_restaurante(cidade: str, uf: str) -> dict:
+    """
+    Após o cruzamento, verifica se algum sócio aparece em mais de 1 CNPJ.
+    Marca multi_restaurante=1 nos CNPJs correspondentes.
+
+    Returns:
+        dict com estatísticas: total_socios_analisados, multi_restaurante
+    """
+    conn = _get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT cnpj, socios_json FROM cnpjs_receita
+            WHERE cidade = ? AND uf = ? AND matched = 1
+            AND socios_json IS NOT NULL AND socios_json != '[]'
+        """, (cidade.upper(), uf.upper())).fetchall()
+
+        if not rows:
+            log.info(f"[MATCH] Nenhum CNPJ matched com sócios para analisar em {cidade}/{uf}")
+            return {"total_socios_analisados": 0, "multi_restaurante": 0}
+
+        # Agrupar por nome de sócio
+        socio_cnpjs = defaultdict(set)
+        for row in rows:
+            try:
+                socios = json.loads(row["socios_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for socio in socios:
+                nome = socio.get("nome", "").strip().upper()
+                if nome and len(nome) >= 5:
+                    socio_cnpjs[nome].add(row["cnpj"])
+
+        # Identificar sócios com múltiplos CNPJs
+        cnpjs_multi = set()
+        multi_count = 0
+        for nome, cnpjs in socio_cnpjs.items():
+            if len(cnpjs) >= 2:
+                multi_count += 1
+                cnpjs_multi.update(cnpjs)
+                log.info(f"[MATCH] 🌟 Sócio {nome} tem {len(cnpjs)} restaurantes!")
+
+        # Marcar no banco
+        if cnpjs_multi:
+            for cnpj in cnpjs_multi:
+                conn.execute(
+                    "UPDATE cnpjs_receita SET multi_restaurante = 1 WHERE cnpj = ?",
+                    (cnpj,)
+                )
+            conn.commit()
+            log.info(f"[MATCH] ✅ {len(cnpjs_multi)} CNPJs marcados como multi-restaurante "
+                  f"({multi_count} sócios com 2+ restaurantes)")
+
+        return {
+            "total_socios_analisados": len(socio_cnpjs),
+            "multi_restaurante": multi_count,
+            "cnpjs_marcados": len(cnpjs_multi),
+        }
+    finally:
+        conn.close()
 
 
 # ============================================================

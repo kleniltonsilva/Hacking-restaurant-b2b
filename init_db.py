@@ -1,9 +1,45 @@
 """
 init_db.py - Inicialização do banco de dados SQLite
-v2.0 - Inclui tabela cnpjs_receita para base da Receita Federal
+v3.0 - Inclui tabela cnpjs_receita com telefone proprietário (cnpj.biz)
 """
 import sqlite3
 from config import DB_PATH
+from logger import log
+
+
+def _migrar_banco(conn):
+    """Adiciona colunas novas via ALTER TABLE (seguro para bancos existentes)."""
+    cursor = conn.cursor()
+
+    # Colunas novas em cnpjs_receita
+    migracoes_receita = [
+        ("telefone_proprietario", "TEXT"),
+        ("tem_ifood", "INTEGER DEFAULT 0"),
+        ("ifood_nome", "TEXT"),
+        ("ifood_url", "TEXT"),
+        ("tipo_empresa", "TEXT"),
+        ("fonte_detalhamento", "TEXT"),
+        ("multi_restaurante", "INTEGER DEFAULT 0"),
+        ("tentativas_falha", "INTEGER DEFAULT 0"),
+        ("ultima_falha", "TEXT"),
+    ]
+    for coluna, tipo in migracoes_receita:
+        try:
+            cursor.execute(f"ALTER TABLE cnpjs_receita ADD COLUMN {coluna} {tipo}")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+
+    # Colunas novas em restaurantes
+    migracoes_restaurantes = [
+        ("telefone_proprietario", "TEXT"),
+    ]
+    for coluna, tipo in migracoes_restaurantes:
+        try:
+            cursor.execute(f"ALTER TABLE restaurantes ADD COLUMN {coluna} {tipo}")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+
+    conn.commit()
 
 
 def init_database():
@@ -27,12 +63,12 @@ def init_database():
             rating TEXT,
             total_reviews TEXT,
             categoria TEXT,
-            
+
             -- iFood
             tem_ifood INTEGER DEFAULT 0,
             ifood_nome TEXT,
             ifood_url TEXT,
-            
+
             -- CNPJ / Societário (preenchido via cruzamento com Receita)
             cnpj TEXT,
             razao_social TEXT,
@@ -43,16 +79,17 @@ def init_database():
             capital_social REAL,
             email_receita TEXT,
             telefones_receita TEXT,
+            telefone_proprietario TEXT,
             porte_empresa TEXT,
             simples INTEGER,
             mei INTEGER,
             score_confianca REAL,
-            
+
             -- Controle
             status TEXT DEFAULT 'pendente',
             data_coleta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            
+
             UNIQUE(nome, cidade, uf)
         )
     """)
@@ -92,20 +129,27 @@ def init_database():
             email TEXT,
             telefone1 TEXT,
             telefone2 TEXT,
+            telefone_proprietario TEXT,
             capital_social REAL,
             porte TEXT,
             natureza_juridica TEXT,
             data_abertura TEXT,
             simples INTEGER,
             mei INTEGER,
+            tipo_empresa TEXT,
             socios_json TEXT,
             fonte TEXT DEFAULT 'casadosdados',
+            fonte_detalhamento TEXT,
             detalhado INTEGER DEFAULT 0,
             data_coleta TEXT,
             data_detalhamento TEXT,
+            tem_ifood INTEGER DEFAULT 0,
+            ifood_nome TEXT,
+            ifood_url TEXT,
             restaurante_id INTEGER,
             score_match REAL,
-            matched INTEGER DEFAULT 0
+            matched INTEGER DEFAULT 0,
+            multi_restaurante INTEGER DEFAULT 0
         )
     """)
 
@@ -151,9 +195,12 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_receita_matched ON cnpjs_receita(matched)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_receita_detalhado ON cnpjs_receita(detalhado)")
 
+    # Migrar banco existente (adicionar colunas novas)
+    _migrar_banco(conn)
+
     conn.commit()
     conn.close()
-    print("[DB] ✅ Banco de dados inicializado com sucesso.")
+    log.info("[DB] ✅ Banco de dados inicializado com sucesso.")
 
 
 if __name__ == "__main__":

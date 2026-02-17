@@ -10,6 +10,7 @@ from urllib.parse import quote_plus
 from playwright.async_api import async_playwright
 
 from config import USER_AGENTS, IFOOD_SEARCH_URL
+from logger import log
 
 
 async def verificar_ifood_batch(restaurantes: list, headless: bool = True) -> list:
@@ -109,22 +110,22 @@ async def verificar_ifood_batch(restaurantes: list, headless: bool = True) -> li
                             continue
                 
                 status = "✅ SIM" if resultado["tem_ifood"] else "❌ NÃO"
-                print(f"[iFood] ({i+1}/{total}) {nome}: {status}")
+                log.info(f"[iFood] ({i+1}/{total}) {nome}: {status}")
                 
             except Exception as e:
-                print(f"[iFood WARN] ({i+1}/{total}) {rest['nome']}: Erro - {e}")
+                log.warning(f"[iFood WARN] ({i+1}/{total}) {rest['nome']}: Erro - {e}")
             
             resultados.append(resultado)
             
             # Delay entre consultas
             if (i + 1) % 5 == 0:
-                print(f"[iFood] ⏳ Pausa de segurança... ({i+1}/{total})")
+                log.info(f"[iFood] ⏳ Pausa de segurança... ({i+1}/{total})")
                 await asyncio.sleep(random.uniform(8, 15))
             else:
                 await asyncio.sleep(random.uniform(3, 6))
     
     except Exception as e:
-        print(f"[iFood ERRO] Falha geral: {e}")
+        log.error(f"[iFood ERRO] Falha geral: {e}")
     
     finally:
         if browser:

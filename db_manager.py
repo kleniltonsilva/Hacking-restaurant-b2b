@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 from config import DB_PATH, STATUS_PENDENTE
+from logger import log
 
 
 def get_connection():
@@ -53,7 +54,7 @@ def inserir_restaurante(dados: dict) -> Optional[int]:
             return cursor.lastrowid
         return None
     except Exception as e:
-        print(f"[DB ERRO] Inserção falhou: {e}")
+        log.error(f"[DB ERRO] Inserção falhou: {e}")
         return None
     finally:
         conn.close()
@@ -89,7 +90,7 @@ def inserir_restaurantes_batch(lista_dados: list) -> int:
                 inseridos += 1
         conn.commit()
     except Exception as e:
-        print(f"[DB ERRO] Batch insert falhou: {e}")
+        log.error(f"[DB ERRO] Batch insert falhou: {e}")
         conn.rollback()
     finally:
         conn.close()
@@ -127,7 +128,7 @@ def atualizar_ifood(restaurante_id: int, tem_ifood: bool, ifood_nome: str = "", 
 
 
 def atualizar_cnpj(restaurante_id: int, dados_cnpj: dict):
-    """Atualiza dados do CNPJ para um restaurante (inclui email e telefone da Receita)."""
+    """Atualiza dados do CNPJ para um restaurante (inclui email, telefone e tel proprietário)."""
     conn = get_connection()
     try:
         # Telefones como string separada por pipe
@@ -135,11 +136,12 @@ def atualizar_cnpj(restaurante_id: int, dados_cnpj: dict):
         telefones_str = " | ".join(telefones) if isinstance(telefones, list) else str(telefones)
 
         conn.execute("""
-            UPDATE restaurantes 
+            UPDATE restaurantes
             SET cnpj = ?, razao_social = ?, nome_fantasia = ?,
                 situacao_cadastral = ?, data_abertura = ?,
                 natureza_juridica = ?, capital_social = ?,
                 email_receita = ?, telefones_receita = ?,
+                telefone_proprietario = ?,
                 porte_empresa = ?, simples = ?, mei = ?,
                 score_confianca = ?,
                 status = 'enriquecido', data_atualizacao = ?
@@ -154,6 +156,7 @@ def atualizar_cnpj(restaurante_id: int, dados_cnpj: dict):
             dados_cnpj.get("capital_social", 0),
             dados_cnpj.get("email_receita", ""),
             telefones_str,
+            dados_cnpj.get("telefone_proprietario", ""),
             dados_cnpj.get("porte_empresa", ""),
             1 if dados_cnpj.get("simples") else 0,
             1 if dados_cnpj.get("mei") else 0,
@@ -195,6 +198,19 @@ def inserir_socios(restaurante_id: int, socios: list):
 # ============================================================
 # CONSULTAS
 # ============================================================
+
+def nomes_restaurantes_cidade(cidade: str, uf: str) -> set:
+    """Retorna set de nomes (lowercase) de restaurantes já no DB para uma cidade."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT nome FROM restaurantes WHERE cidade = ? AND uf = ?",
+            (cidade, uf)
+        ).fetchall()
+        return {row["nome"].strip().lower() for row in rows if row["nome"]}
+    finally:
+        conn.close()
+
 
 def buscar_por_cidade(cidade: str, uf: str) -> list:
     """Retorna todos os restaurantes de uma cidade."""
@@ -262,12 +278,16 @@ def estatisticas_gerais() -> dict:
             "SELECT COUNT(*) FROM restaurantes WHERE cnpj IS NOT NULL AND cnpj != ''"
         ).fetchone()[0]
         stats["total_socios"] = conn.execute("SELECT COUNT(*) FROM socios").fetchone()[0]
+        stats["com_tel_proprietario"] = conn.execute(
+            "SELECT COUNT(*) FROM restaurantes WHERE telefone_proprietario IS NOT NULL AND telefone_proprietario != ''"
+        ).fetchone()[0]
 
         # Por cidade
         rows = conn.execute("""
             SELECT cidade, uf, COUNT(*) as total,
                    SUM(CASE WHEN tem_ifood = 1 THEN 1 ELSE 0 END) as com_ifood,
-                   SUM(CASE WHEN cnpj IS NOT NULL AND cnpj != '' THEN 1 ELSE 0 END) as com_cnpj
+                   SUM(CASE WHEN cnpj IS NOT NULL AND cnpj != '' THEN 1 ELSE 0 END) as com_cnpj,
+                   SUM(CASE WHEN telefone_proprietario IS NOT NULL AND telefone_proprietario != '' THEN 1 ELSE 0 END) as com_tel_prop
             FROM restaurantes
             GROUP BY cidade, uf
             ORDER BY total DESC
@@ -302,16 +322,72 @@ def buscar_todos_para_export(cidade: str = None, uf: str = None) -> list:
         conn.close()
 
 
+def buscar_leads_receita(cidade: str = None, uf: str = None) -> list:
+    """Retorna TODOS os CNPJs da Receita (detalhados ou não).
+    Inclui dados do Maps quando há match. Exporta a base completa."""
+    conn = get_connection()
+    try:
+        query = """
+            SELECT cr.*,
+                   r.nome as nome_maps, r.endereco as endereco_maps,
+                   r.telefone as telefone_maps, r.website as website_maps,
+                   r.rating, r.total_reviews, r.google_maps_url,
+                   r.tem_ifood as maps_tem_ifood, r.ifood_nome as maps_ifood_nome
+            FROM cnpjs_receita cr
+            LEFT JOIN restaurantes r ON cr.restaurante_id = r.id
+            WHERE 1=1
+        """
+        params = []
+        if cidade and uf:
+            query += " AND cr.cidade = ? AND cr.uf = ?"
+            params = [cidade.upper(), uf.upper()]
+        query += " ORDER BY cr.cidade, cr.razao_social"
+
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def buscar_leads_detalhados(cidade: str = None, uf: str = None) -> list:
+    """Retorna apenas CNPJs DETALHADOS da Receita (com dados completos).
+    Usado para abas filtradas (Premium, Com Contato, Com Sócios)."""
+    conn = get_connection()
+    try:
+        query = """
+            SELECT cr.*,
+                   r.nome as nome_maps, r.endereco as endereco_maps,
+                   r.telefone as telefone_maps, r.website as website_maps,
+                   r.rating, r.total_reviews, r.google_maps_url,
+                   r.tem_ifood as maps_tem_ifood, r.ifood_nome as maps_ifood_nome
+            FROM cnpjs_receita cr
+            LEFT JOIN restaurantes r ON cr.restaurante_id = r.id
+            WHERE cr.detalhado = 1
+        """
+        params = []
+        if cidade and uf:
+            query += " AND cr.cidade = ? AND cr.uf = ?"
+            params = [cidade.upper(), uf.upper()]
+        query += " ORDER BY cr.cidade, cr.razao_social"
+
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def resetar_banco():
-    """Remove TODOS os dados do banco. USE COM CUIDADO."""
+    """Remove TODOS os dados do banco (incluindo Receita). USE COM CUIDADO."""
     conn = get_connection()
     try:
         conn.execute("DELETE FROM socios")
         conn.execute("DELETE FROM restaurantes")
         conn.execute("DELETE FROM varreduras")
+        conn.execute("DELETE FROM cnpjs_receita")
+        conn.execute("DELETE FROM varreduras_receita")
         conn.execute("DELETE FROM sqlite_sequence")
         conn.commit()
-        print("[DB] 🗑️  Banco resetado com sucesso.")
+        log.info("[DB] 🗑️  Banco resetado com sucesso (incluindo Receita).")
     finally:
         conn.close()
 
@@ -343,6 +419,154 @@ def finalizar_varredura(cidade: str, uf: str, total: int):
             WHERE cidade = ? AND uf = ?
         """, (total, datetime.now().isoformat(), cidade, uf))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def buscar_cnpjs_para_maps_direcionado(cidade: str, uf: str) -> list:
+    """Retorna CNPJs detalhados sem match no Maps, com endereço disponível."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT * FROM cnpjs_receita
+            WHERE cidade = ? AND uf = ?
+            AND detalhado = 1 AND matched = 0
+            AND logradouro IS NOT NULL AND logradouro != ''
+            ORDER BY data_coleta ASC
+        """, (cidade.upper(), uf.upper())).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def inserir_restaurante_e_vincular(dados_maps: dict, dados_cnpj: dict) -> Optional[int]:
+    """
+    Insere restaurante do Maps e vincula ao CNPJ em uma transacao.
+    - INSERT OR IGNORE na tabela restaurantes
+    - UPDATE cnpjs_receita SET matched=1, restaurante_id, score_match
+    - Propaga dados do CNPJ para o restaurante
+    Retorna o ID do restaurante ou None.
+    """
+    conn = get_connection()
+    try:
+        # Inserir restaurante (ou pegar existente)
+        cursor = conn.execute("""
+            INSERT OR IGNORE INTO restaurantes
+            (nome, endereco, telefone, website, cidade, uf, latitude, longitude,
+             google_maps_url, rating, total_reviews, categoria, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processado')
+        """, (
+            dados_maps.get("nome", ""),
+            dados_maps.get("endereco", ""),
+            dados_maps.get("telefone", ""),
+            dados_maps.get("website", ""),
+            dados_maps.get("cidade", ""),
+            dados_maps.get("uf", ""),
+            dados_maps.get("latitude", ""),
+            dados_maps.get("longitude", ""),
+            dados_maps.get("google_maps_url", ""),
+            dados_maps.get("rating", ""),
+            dados_maps.get("total_reviews", ""),
+            dados_maps.get("categoria", ""),
+        ))
+
+        if cursor.rowcount > 0:
+            rest_id = cursor.lastrowid
+        else:
+            # Restaurante ja existe, buscar ID
+            row = conn.execute(
+                "SELECT id FROM restaurantes WHERE nome = ? AND cidade = ? AND uf = ?",
+                (dados_maps.get("nome", ""), dados_maps.get("cidade", ""), dados_maps.get("uf", ""))
+            ).fetchone()
+            rest_id = row["id"] if row else None
+
+        if not rest_id:
+            conn.rollback()
+            return None
+
+        cnpj = dados_cnpj.get("cnpj", "")
+        score = dados_cnpj.get("score_match", 0)
+
+        # Vincular CNPJ ao restaurante
+        conn.execute("""
+            UPDATE cnpjs_receita
+            SET matched = 1, restaurante_id = ?, score_match = ?
+            WHERE cnpj = ?
+        """, (rest_id, score, cnpj))
+
+        # Propagar dados do CNPJ para o restaurante
+        telefones = []
+        t1 = dados_cnpj.get("telefone1", "")
+        t2 = dados_cnpj.get("telefone2", "")
+        if t1: telefones.append(t1)
+        if t2: telefones.append(t2)
+        telefones_str = " | ".join(telefones)
+
+        conn.execute("""
+            UPDATE restaurantes SET
+                cnpj = ?,
+                razao_social = ?,
+                nome_fantasia = COALESCE(NULLIF(?, ''), nome_fantasia),
+                situacao_cadastral = ?,
+                data_abertura = ?,
+                natureza_juridica = ?,
+                capital_social = ?,
+                email_receita = ?,
+                telefones_receita = ?,
+                telefone_proprietario = ?,
+                porte_empresa = ?,
+                simples = ?,
+                mei = ?,
+                score_confianca = ?,
+                status = 'enriquecido',
+                data_atualizacao = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (
+            cnpj,
+            dados_cnpj.get("razao_social", ""),
+            dados_cnpj.get("nome_fantasia", ""),
+            dados_cnpj.get("situacao_cadastral", "ATIVA"),
+            dados_cnpj.get("data_abertura", ""),
+            dados_cnpj.get("natureza_juridica", ""),
+            dados_cnpj.get("capital_social", 0),
+            dados_cnpj.get("email", ""),
+            telefones_str,
+            dados_cnpj.get("telefone_proprietario", ""),
+            dados_cnpj.get("porte", ""),
+            1 if dados_cnpj.get("simples") else 0,
+            1 if dados_cnpj.get("mei") else 0,
+            score,
+            rest_id,
+        ))
+
+        # Inserir socios se houver
+        import json
+        socios_json = dados_cnpj.get("socios_json", "[]")
+        try:
+            socios = json.loads(socios_json) if socios_json else []
+            for socio in socios:
+                conn.execute("""
+                    INSERT OR IGNORE INTO socios
+                    (restaurante_id, nome_socio, qualificacao, tipo, cpf_cnpj_socio, data_entrada)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    rest_id,
+                    socio.get("nome", ""),
+                    socio.get("qualificacao", ""),
+                    socio.get("tipo", ""),
+                    socio.get("cpf_cnpj", ""),
+                    socio.get("data_entrada", ""),
+                ))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        conn.commit()
+        return rest_id
+
+    except Exception as e:
+        log.error(f"[DB ERRO] inserir_restaurante_e_vincular: {e}")
+        conn.rollback()
+        return None
     finally:
         conn.close()
 

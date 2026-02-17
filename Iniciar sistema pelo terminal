@@ -1,0 +1,27 @@
+
+
+
+
+cd ~/Hacking-restaurant-b2b
+source .venv/bin/activate
+
+
+tenho uma questão mutio importante a tratar, primeiro o sistema esta funcionando perfeitamente como deve ser todo logica esta perfeita!, entretanto executei o programa e escolhi pepilani completo de todas as 27 capitais do brasil, apos finaliar exportei excel com todos os leads, mas só tenho 1060 cnpjs e leads no arquivo excel. MINHA duvida é se em são paulo tem 33992 ATIVAS encontradas (500 páginas), porque ele não esta buscando todos os dados de todos os cnpjs? se todas as capitais do brasil juntas deram apenas 1060 restaurantes, tem algo de errado, investigue por  que isso acontece, mas resalto que a logica de funcinamento atual, e fluxo esta como deve ser
+2026-02-17 21:05:48 | ── A/5: Coleta Receita Federal ──
+2026-02-17 21:05:49 | [RECEITA] 📊 Base atual: 61 CNPJs de São Paulo/SP # porque apenas 61 cnpjs? se existem milhares, isso não pode ocorrer, me explique porque acontece isso?
+2026-02-17 21:05:51 | [RECEITA] ✅ API direta funcionando!
+2026-02-17 21:05:51 | [RECEITA] 🔍 CNAE 5611201 (Restaurantes) em São Paulo/SP...
+2026-02-17 21:05:51 | [RECEITA] 📊 33992 ATIVAS encontradas (500 páginas)
+2026-02-17 21:30:04 | [RECEITA] ✅ CNAE 5611201: 10000 encontrados, 0 novos
+2026-02-17 21:30:08 | [RECEITA] 🔍 CNAE 5611202 (Bares) em São Paulo/SP...
+2026-02-17 21:30:09 | [RECEITA] 📊 1 ATIVAS encontradas (1 páginas)
+2026-02-17 21:30:09 | [RECEITA] ✅ CNAE 5611202: 1 encontrados, 0 novos
+2026-02-17 21:30:12 | [RECEITA] 🔍 CNAE 5611203 (Lanchonetes) em São Paulo/SP...
+2026-02-17 21:30:13 | [RECEITA] 📊 34887 ATIVAS encontradas (500 páginas)
+
+
+
+
+
+
+

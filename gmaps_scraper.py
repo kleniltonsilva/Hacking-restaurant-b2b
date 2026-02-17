@@ -13,7 +13,12 @@ from config import (
     USER_AGENTS, MIN_DELAY, MAX_DELAY,
     SCROLL_DELAY_MIN, SCROLL_DELAY_MAX,
     MAX_SCROLLS, PAGE_TIMEOUT,
+    GMAPS_DIRECTED_CONCURRENT_TABS, GMAPS_DIRECTED_DELAY_MIN,
+    GMAPS_DIRECTED_DELAY_MAX, GMAPS_DIRECTED_MAX_RETRIES,
+    GMAPS_DIRECTED_RETRY_BACKOFF, GMAPS_DIRECTED_SCORE_MINIMO,
+    GMAPS_DIRECTED_TIMEOUT,
 )
+from logger import log
 
 
 async def _delay(min_s: float = None, max_s: float = None):
@@ -103,7 +108,7 @@ async def _aceitar_cookies(page: Page):
             btn = page.locator(seletor).first
             if await btn.is_visible(timeout=2000):
                 await btn.click()
-                print("[LOG] ✅ Modal de cookies aceito.")
+                log.info("[LOG] ✅ Modal de cookies aceito.")
                 await _short_delay()
                 return True
         except Exception:
@@ -122,12 +127,12 @@ async def _scroll_lista_resultados(page: Page) -> int:
     try:
         await page.wait_for_selector(feed_selector, timeout=15000)
     except Exception:
-        print("[WARN] Lista de resultados não encontrada, tentando seletor alternativo...")
+        log.warning("[WARN] Lista de resultados não encontrada, tentando seletor alternativo...")
         feed_selector = '.m6QErb[aria-label]'
         try:
             await page.wait_for_selector(feed_selector, timeout=10000)
         except Exception:
-            print("[ERRO] Não foi possível localizar a lista de resultados.")
+            log.error("[ERRO] Não foi possível localizar a lista de resultados.")
             return 0
     
     ultimo_count = 0
@@ -147,7 +152,7 @@ async def _scroll_lista_resultados(page: Page) -> int:
         try:
             end_marker = page.locator('span.HlvSq, p.fontBodyMedium:has-text("Você chegou ao final")')
             if await end_marker.is_visible(timeout=1000):
-                print(f"[LOG] 📋 Final da lista atingido após {i+1} scrolls.")
+                log.info(f"[LOG] 📋 Final da lista atingido após {i+1} scrolls.")
                 break
         except Exception:
             pass
@@ -158,12 +163,12 @@ async def _scroll_lista_resultados(page: Page) -> int:
         if count == ultimo_count:
             scrolls_sem_novos += 1
             if scrolls_sem_novos >= max_sem_novos:
-                print(f"[LOG] 📋 Sem novos resultados após {max_sem_novos} scrolls. Total: {count}")
+                log.info(f"[LOG] 📋 Sem novos resultados após {max_sem_novos} scrolls. Total: {count}")
                 break
         else:
             scrolls_sem_novos = 0
             if count % 20 == 0 or count != ultimo_count:
-                print(f"[LOG] 🔄 Scroll {i+1}: {count} restaurantes carregados...")
+                log.info(f"[LOG] 🔄 Scroll {i+1}: {count} restaurantes carregados...")
         
         ultimo_count = count
     
@@ -263,98 +268,130 @@ async def _extrair_detalhes_card(page: Page, card_element) -> dict:
             pass
         
     except Exception as e:
-        print(f"[WARN] Erro ao extrair detalhes: {e}")
+        log.warning(f"[WARN] Erro ao extrair detalhes: {e}")
     
     return dados
 
 
 async def scrape_restaurantes_cidade(cidade: str, uf: str, headless: bool = True,
-                                      callback=None) -> list:
+                                      callback=None, save_callback=None,
+                                      nomes_existentes: set = None) -> list:
     """
     Realiza varredura completa de restaurantes em uma cidade via Google Maps.
-    
+
     Args:
         cidade: Nome da cidade
         uf: Sigla do estado
         headless: Se True, roda sem abrir janela do browser
         callback: Função chamada a cada restaurante extraído (para log em tempo real)
-    
+        save_callback: Função para salvar restaurante no DB imediatamente (progresso incremental)
+        nomes_existentes: Set de nomes já no DB para pular (retomada de onde parou)
+
     Returns:
         Lista de dicts com dados dos restaurantes
     """
     termo_busca = f"restaurantes em {cidade} {uf}"
     url = f"https://www.google.com.br/maps/search/{quote_plus(termo_busca)}"
-    
-    print(f"\n[LOG] 🔍 Iniciando varredura: '{termo_busca}'")
-    print(f"[LOG] 🌐 URL: {url}")
-    
+
+    log.info(f"[LOG] 🔍 Iniciando varredura: '{termo_busca}'")
+    log.info(f"[LOG] 🌐 URL: {url}")
+
     resultados = []
+    nomes_extraidos = set()  # Deduplicação dentro da sessão
+    urls_extraidos = set()   # Deduplicação por URL
+    if nomes_existentes:
+        nomes_extraidos.update(nomes_existentes)
+        log.info(f"[LOG] 📊 {len(nomes_existentes)} restaurantes já no DB (serão pulados)")
+
     pw = None
     browser = None
-    
+
     try:
         pw, browser, context, page = await _criar_browser(headless)
-        
+
         # Acessar Google Maps
-        print("[LOG] 🚀 Acessando Google Maps...")
+        log.info("[LOG] 🚀 Acessando Google Maps...")
         await page.goto(url, wait_until="networkidle", timeout=PAGE_TIMEOUT)
         await _delay(3, 6)
-        
+
         # Aceitar cookies
         await _aceitar_cookies(page)
         await _delay(2, 4)
-        
+
         # Scroll para carregar todos os resultados
-        print("[LOG] 📜 Iniciando scroll na lista de resultados...")
+        log.info("[LOG] 📜 Iniciando scroll na lista de resultados...")
         total_carregados = await _scroll_lista_resultados(page)
-        print(f"[LOG] ✅ Total de cards carregados: {total_carregados}")
-        
+        log.info(f"[LOG] ✅ Total de cards carregados: {total_carregados}")
+
         if total_carregados == 0:
-            print("[WARN] Nenhum resultado encontrado. Verifique o termo de busca.")
+            log.warning("[WARN] Nenhum resultado encontrado. Verifique o termo de busca.")
             return resultados
-        
+
         # Extrair dados de cada card
         cards = page.locator('div[role="feed"] > div > div > a[href*="maps/place"]')
         total = await cards.count()
-        
-        print(f"[LOG] 🏪 Extraindo detalhes de {total} restaurantes...")
-        
+
+        log.info(f"[LOG] 🏪 Extraindo detalhes de {total} restaurantes...")
+
         for i in range(total):
             try:
                 card = cards.nth(i)
-                
+
                 # Garantir que o card está visível (scroll até ele)
                 await card.scroll_into_view_if_needed()
                 await asyncio.sleep(random.uniform(0.5, 1.5))
-                
+
                 dados = await _extrair_detalhes_card(page, card)
                 dados["cidade"] = cidade
                 dados["uf"] = uf
-                
+
                 if dados["nome"]:
+                    nome_lower = dados["nome"].strip().lower()
+                    maps_url = dados.get("google_maps_url", "")
+
+                    # Deduplicação: pular se nome ou URL já foi extraído
+                    if nome_lower in nomes_extraidos:
+                        log.info(f"[LOG] ⏭️ Duplicata ignorada: {dados['nome']}")
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(random.uniform(0.3, 0.7))
+                        continue
+                    if maps_url and maps_url in urls_extraidos:
+                        log.info(f"[LOG] ⏭️ Duplicata (URL) ignorada: {dados['nome']}")
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(random.uniform(0.3, 0.7))
+                        continue
+
+                    nomes_extraidos.add(nome_lower)
+                    if maps_url:
+                        urls_extraidos.add(maps_url)
+
                     resultados.append(dados)
-                    
+
+                    # Salvar imediatamente no DB (progresso incremental)
+                    if save_callback:
+                        save_callback(dados)
+
                     # Log em tempo real
                     tel_info = f" | Tel: {dados['telefone']}" if dados['telefone'] else ""
                     web_info = f" | Web: {dados['website']}" if dados['website'] else ""
-                    print(f"[+] ({i+1}/{total}) {dados['nome']}{tel_info}{web_info}")
-                    
+                    log.info(f"[+] ({i+1}/{total}) {dados['nome']}{tel_info}{web_info}")
+
                     if callback:
                         callback(dados)
-                
+
                 # Delay entre extrações para não ser bloqueado
                 if (i + 1) % 10 == 0:
-                    print(f"[LOG] ⏳ Pausa de segurança... ({i+1}/{total})")
+                    log.info(f"[LOG] ⏳ Pausa de segurança... ({i+1}/{total})")
                     await _delay(5, 10)
                 else:
                     await _delay(1, 3)
-                
+
                 # Voltar para a lista (pressionar ESC ou clicar na lista)
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(random.uniform(0.5, 1))
-                
+
             except Exception as e:
-                print(f"[WARN] Erro no card {i+1}: {e}")
+                log.warning(f"[WARN] Erro no card {i+1}: {e}")
                 # Tentar recuperar voltando para a lista
                 try:
                     await page.keyboard.press("Escape")
@@ -362,18 +399,18 @@ async def scrape_restaurantes_cidade(cidade: str, uf: str, headless: bool = True
                 except Exception:
                     pass
                 continue
-        
-        print(f"\n[SUCESSO] ✅ {cidade}/{uf}: {len(resultados)} restaurantes extraídos com sucesso!")
-        
+
+        log.info(f"[SUCESSO] ✅ {cidade}/{uf}: {len(resultados)} restaurantes extraídos com sucesso!")
+
     except Exception as e:
-        print(f"[ERRO] ❌ Falha na varredura de {cidade}/{uf}: {e}")
-    
+        log.error(f"[ERRO] ❌ Falha na varredura de {cidade}/{uf}: {e}")
+
     finally:
         if browser:
             await browser.close()
         if pw:
             await pw.stop()
-    
+
     return resultados
 
 
@@ -386,7 +423,7 @@ async def scrape_cidade_simples(cidade: str, uf: str, headless: bool = True) -> 
     termo_busca = f"restaurantes em {cidade} {uf}"
     url = f"https://www.google.com.br/maps/search/{quote_plus(termo_busca)}"
     
-    print(f"\n[LOG] 🔍 Varredura rápida: '{termo_busca}'")
+    log.info(f"[LOG] 🔍 Varredura rápida: '{termo_busca}'")
     
     resultados = []
     pw = None
@@ -454,14 +491,408 @@ async def scrape_cidade_simples(cidade: str, uf: str, headless: bool = True) -> 
             
             resultados.append(d)
         
-        print(f"[SUCESSO] ✅ {cidade}/{uf}: {len(resultados)} restaurantes (modo rápido)")
-        
+        log.info(f"[SUCESSO] ✅ {cidade}/{uf}: {len(resultados)} restaurantes (modo rápido)")
+
     except Exception as e:
-        print(f"[ERRO] ❌ Falha: {e}")
+        log.error(f"[ERRO] ❌ Falha: {e}")
     finally:
         if browser:
             await browser.close()
         if pw:
             await pw.stop()
-    
+
     return resultados
+
+
+# ============================================================
+# BUSCA DIRECIONADA - Por endereço do CNPJ
+# ============================================================
+
+def _construir_queries_maps(cnpj_data: dict) -> list:
+    """
+    Gera queries de busca no Maps em ordem de prioridade.
+    1. Nome fantasia + cidade + uf
+    2. Endereço (logradouro + numero + cidade + uf)
+    3. Nome fantasia + endereço + cidade
+    """
+    queries = []
+    nome = cnpj_data.get("nome_fantasia", "") or ""
+    razao = cnpj_data.get("razao_social", "") or ""
+    logradouro = cnpj_data.get("logradouro", "") or ""
+    numero = cnpj_data.get("numero", "") or ""
+    cidade = cnpj_data.get("cidade", "") or ""
+    uf = cnpj_data.get("uf", "") or ""
+
+    # Cidade em title case para busca
+    cidade_display = cidade.title() if cidade else ""
+
+    # Query 1: nome fantasia (se diferente da razao social)
+    if nome and nome.upper() != razao.upper():
+        queries.append(f"{nome} {cidade_display} {uf}")
+
+    # Query 2: endereco
+    endereco_parts = [logradouro]
+    if numero:
+        endereco_parts.append(numero)
+    endereco_str = " ".join(endereco_parts)
+    if endereco_str.strip():
+        queries.append(f"{endereco_str} {cidade_display} {uf}")
+
+    # Query 3: nome + endereco combinado
+    if nome and nome.upper() != razao.upper() and endereco_str.strip():
+        queries.append(f"{nome} {endereco_str} {cidade_display}")
+
+    # Fallback: razao social (sem sufixos juridicos)
+    if not queries:
+        razao_limpa = re.sub(r'\s*(LTDA|ME|EIRELI|S/?A|EPP|SLU|SS)\s*$', '', razao, flags=re.IGNORECASE).strip()
+        if razao_limpa:
+            queries.append(f"{razao_limpa} {cidade_display} {uf}")
+
+    return queries
+
+
+async def _extrair_detalhes_lugar(page) -> dict:
+    """Extrai dados do lugar aberto no Maps (painel lateral)."""
+    dados = {
+        "nome": "", "endereco": "", "telefone": "", "website": "",
+        "rating": "", "total_reviews": "", "categoria": "",
+        "google_maps_url": "", "latitude": "", "longitude": "",
+    }
+
+    try:
+        # URL atual (contém coordenadas)
+        url = page.url
+        dados["google_maps_url"] = url
+
+        coord_match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+        if coord_match:
+            dados["latitude"] = coord_match.group(1)
+            dados["longitude"] = coord_match.group(2)
+
+        # Nome
+        try:
+            nome_el = page.locator('h1.DUwDvf, h1.fontHeadlineLarge').first
+            if await nome_el.is_visible(timeout=3000):
+                dados["nome"] = (await nome_el.text_content()).strip()
+        except Exception:
+            pass
+
+        # Rating
+        try:
+            rating_el = page.locator('div.F7nice span[aria-hidden="true"]').first
+            if await rating_el.is_visible(timeout=2000):
+                dados["rating"] = (await rating_el.text_content()).strip()
+        except Exception:
+            pass
+
+        # Total de avaliacoes
+        try:
+            reviews_el = page.locator('div.F7nice span[aria-label*="avaliação"], div.F7nice span[aria-label*="review"]').first
+            if await reviews_el.is_visible(timeout=2000):
+                texto = (await reviews_el.text_content()).strip()
+                num = re.sub(r'[^\d]', '', texto)
+                dados["total_reviews"] = num
+        except Exception:
+            pass
+
+        # Categoria
+        try:
+            cat_el = page.locator('button.DkEaL, span.DkEaL').first
+            if await cat_el.is_visible(timeout=2000):
+                dados["categoria"] = (await cat_el.text_content()).strip()
+        except Exception:
+            pass
+
+        # Endereco
+        try:
+            addr_el = page.locator('[data-item-id="address"] .fontBodyMedium, button[data-item-id="address"]').first
+            if await addr_el.is_visible(timeout=2000):
+                dados["endereco"] = (await addr_el.text_content()).strip()
+        except Exception:
+            pass
+
+        # Telefone
+        try:
+            phone_el = page.locator('[data-item-id*="phone"] .fontBodyMedium, button[data-item-id*="phone"]').first
+            if await phone_el.is_visible(timeout=2000):
+                texto = (await phone_el.text_content()).strip()
+                telefone_limpo = re.sub(r'[^\d()+\- ]', '', texto)
+                dados["telefone"] = telefone_limpo.strip()
+        except Exception:
+            pass
+
+        # Website
+        try:
+            web_el = page.locator('[data-item-id="authority"] .fontBodyMedium, a[data-item-id="authority"]').first
+            if await web_el.is_visible(timeout=2000):
+                dados["website"] = (await web_el.text_content()).strip()
+        except Exception:
+            pass
+
+    except Exception as e:
+        log.warning(f"[WARN] Erro ao extrair detalhes do lugar: {e}")
+
+    return dados
+
+
+async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
+    """
+    Busca um CNPJ especifico no Maps usando queries geradas.
+    Tenta cada query, verifica score de endereco.
+    Retorna dados do Maps + score ou {} se nao encontrou.
+    """
+    from address_matcher import calcular_score_endereco
+
+    queries = _construir_queries_maps(cnpj_data)
+    cnpj = cnpj_data.get("cnpj", "???")
+    logradouro = cnpj_data.get("logradouro", "") or ""
+    numero = cnpj_data.get("numero", "") or ""
+    bairro = cnpj_data.get("bairro", "") or ""
+    cidade_cnpj = (cnpj_data.get("cidade", "") or "").upper()
+
+    if not queries:
+        log.warning(f"[MAPS-DIR] ⚠️ {cnpj}: sem queries possiveis")
+        return {}
+
+    for qi, query in enumerate(queries):
+        try:
+            search_url = f"https://www.google.com.br/maps/search/{quote_plus(query)}"
+            await page.goto(search_url, wait_until="domcontentloaded",
+                          timeout=GMAPS_DIRECTED_TIMEOUT)
+            await asyncio.sleep(random.uniform(3, 6))
+
+            # Detectar se caiu direto no lugar (URL tem /place/)
+            current_url = page.url
+            caiu_no_lugar = '/place/' in current_url
+
+            if caiu_no_lugar:
+                # Resultado unico - extrair diretamente
+                dados = await _extrair_detalhes_lugar(page)
+                if dados["nome"] and dados["endereco"]:
+                    # Verificar se e da mesma cidade
+                    endereco_upper = dados["endereco"].upper()
+                    if cidade_cnpj and cidade_cnpj.replace(" ", "") not in endereco_upper.replace(" ", ""):
+                        # Tentar com cidade title case
+                        cidade_title = cnpj_data.get("cidade", "").title()
+                        if cidade_title not in dados["endereco"]:
+                            log.info(f"[MAPS-DIR] ⏭️ {cnpj} q{qi+1}: resultado de outra cidade")
+                            continue
+
+                    score = calcular_score_endereco(
+                        dados["endereco"], logradouro,
+                        numero_receita=numero, bairro_receita=bairro
+                    )
+                    if score >= GMAPS_DIRECTED_SCORE_MINIMO:
+                        dados["score_match"] = score
+                        log.info(f"[MAPS-DIR] 🟢 {cnpj}: {dados['nome'][:35]} (score={score:.2f}, q{qi+1})")
+                        return dados
+                    else:
+                        log.info(f"[MAPS-DIR] 🟡 {cnpj} q{qi+1}: score baixo ({score:.2f}) - {dados['nome'][:30]}")
+            else:
+                # Lista de resultados - tentar os 3 primeiros
+                await asyncio.sleep(random.uniform(1, 3))
+                cards = page.locator('div[role="feed"] > div > div > a[href*="maps/place"]')
+                total_cards = await cards.count()
+
+                if total_cards == 0:
+                    log.info(f"[MAPS-DIR] ⏭️ {cnpj} q{qi+1}: sem resultados")
+                    continue
+
+                melhor_dados = None
+                melhor_score = 0.0
+
+                for ci in range(min(total_cards, 3)):
+                    try:
+                        card = cards.nth(ci)
+                        await card.scroll_into_view_if_needed()
+                        await asyncio.sleep(random.uniform(0.5, 1))
+                        await card.click()
+                        await asyncio.sleep(random.uniform(2, 4))
+
+                        dados = await _extrair_detalhes_lugar(page)
+
+                        if dados["nome"] and dados["endereco"]:
+                            score = calcular_score_endereco(
+                                dados["endereco"], logradouro,
+                                numero_receita=numero, bairro_receita=bairro
+                            )
+                            if score > melhor_score:
+                                melhor_score = score
+                                melhor_dados = dados.copy()
+                                melhor_dados["score_match"] = score
+
+                        # Voltar para lista
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(random.uniform(0.5, 1))
+
+                    except Exception as e:
+                        log.warning(f"[MAPS-DIR] ⚠️ {cnpj} q{qi+1} card{ci+1}: {e}")
+                        try:
+                            await page.keyboard.press("Escape")
+                            await asyncio.sleep(0.5)
+                        except Exception:
+                            pass
+
+                if melhor_dados and melhor_score >= GMAPS_DIRECTED_SCORE_MINIMO:
+                    log.info(f"[MAPS-DIR] 🟢 {cnpj}: {melhor_dados['nome'][:35]} (score={melhor_score:.2f}, q{qi+1})")
+                    return melhor_dados
+                elif melhor_score > 0:
+                    log.info(f"[MAPS-DIR] 🟡 {cnpj} q{qi+1}: melhor score={melhor_score:.2f} (abaixo minimo)")
+
+        except Exception as e:
+            log.warning(f"[MAPS-DIR] ⚠️ {cnpj} q{qi+1}: {e}")
+
+    log.info(f"[MAPS-DIR] 🔴 {cnpj}: nao encontrado no Maps")
+    return {}
+
+
+async def _buscar_um_cnpj_maps(page, cnpj_data: dict, semaphore, stats: dict) -> dict:
+    """
+    Wrapper com semaphore + retry para buscar um CNPJ no Maps.
+    Auto-ajusta delays se muitas falhas consecutivas.
+    """
+    async with semaphore:
+        cnpj = cnpj_data.get("cnpj", "???")
+
+        for tentativa in range(GMAPS_DIRECTED_MAX_RETRIES + 1):
+            try:
+                resultado = await _buscar_cnpj_no_maps(page, cnpj_data)
+
+                if resultado:
+                    stats["encontrados"] += 1
+                    stats["falhas_consecutivas"] = 0
+                    return {"cnpj_data": cnpj_data, "maps_data": resultado}
+                else:
+                    stats["nao_encontrados"] += 1
+                    stats["falhas_consecutivas"] = 0
+                    return {"cnpj_data": cnpj_data, "maps_data": {}}
+
+            except Exception as e:
+                stats["falhas_consecutivas"] = stats.get("falhas_consecutivas", 0) + 1
+                if tentativa < GMAPS_DIRECTED_MAX_RETRIES:
+                    backoff = GMAPS_DIRECTED_RETRY_BACKOFF[tentativa]
+                    # Auto-ajuste: se muitas falhas, aumentar delay
+                    if stats["falhas_consecutivas"] > 3:
+                        backoff = int(backoff * 1.5)
+                        log.warning(f"[MAPS-DIR] ⚠️ {stats['falhas_consecutivas']} falhas consecutivas, "
+                                  f"aumentando delay para {backoff}s")
+                    log.warning(f"[MAPS-DIR] ⚠️ {cnpj}: erro (tentativa {tentativa+1}/{GMAPS_DIRECTED_MAX_RETRIES+1}), "
+                              f"retry em {backoff}s: {e}")
+                    await asyncio.sleep(backoff)
+                else:
+                    log.error(f"[MAPS-DIR] ❌ {cnpj}: falhou apos {GMAPS_DIRECTED_MAX_RETRIES+1} tentativas: {e}")
+                    stats["erros"] += 1
+                    return {"cnpj_data": cnpj_data, "maps_data": {}}
+
+        # Delay entre buscas
+        await _delay(GMAPS_DIRECTED_DELAY_MIN, GMAPS_DIRECTED_DELAY_MAX)
+
+    return {"cnpj_data": cnpj_data, "maps_data": {}}
+
+
+async def scrape_maps_direcionado(cidade: str, uf: str, headless: bool = True,
+                                   callback=None) -> dict:
+    """
+    Busca direcionada no Maps: para cada CNPJ detalhado com endereco,
+    busca especificamente no Maps por aquele endereco.
+
+    Args:
+        cidade: Nome da cidade
+        uf: Sigla do estado
+        headless: Se True, roda sem abrir janela
+        callback: Funcao(dados_maps, dados_cnpj) chamada para cada match
+
+    Returns:
+        dict com stats: {total, encontrados, nao_encontrados, erros}
+    """
+    from db_manager import buscar_cnpjs_para_maps_direcionado
+
+    cnpjs = buscar_cnpjs_para_maps_direcionado(cidade, uf)
+    if not cnpjs:
+        log.info(f"[MAPS-DIR] ✅ Nenhum CNPJ pendente para busca direcionada em {cidade}/{uf}")
+        return {"total": 0, "encontrados": 0, "nao_encontrados": 0, "erros": 0}
+
+    log.info(f"[MAPS-DIR] 🎯 {len(cnpjs)} CNPJs para busca direcionada em {cidade}/{uf}")
+
+    stats = {
+        "total": len(cnpjs),
+        "encontrados": 0,
+        "nao_encontrados": 0,
+        "erros": 0,
+        "falhas_consecutivas": 0,
+    }
+
+    pw = None
+    browser = None
+    semaphore = asyncio.Semaphore(1)  # Sequencial por tab (1 busca por vez por tab)
+
+    try:
+        pw, browser, context, page = await _criar_browser(headless)
+        page.set_default_timeout(GMAPS_DIRECTED_TIMEOUT)
+
+        # Aceitar cookies na primeira navegacao
+        await page.goto("https://www.google.com.br/maps", wait_until="domcontentloaded",
+                       timeout=GMAPS_DIRECTED_TIMEOUT)
+        await asyncio.sleep(random.uniform(3, 5))
+        await _aceitar_cookies(page)
+        await asyncio.sleep(random.uniform(1, 3))
+
+        # Criar tabs adicionais
+        pages = [page]
+        for _ in range(GMAPS_DIRECTED_CONCURRENT_TABS - 1):
+            new_page = await context.new_page()
+            new_page.set_default_timeout(GMAPS_DIRECTED_TIMEOUT)
+            pages.append(new_page)
+
+        log.info(f"[MAPS-DIR] 🌐 {len(pages)} tabs criadas")
+
+        # Distribuir CNPJs em round-robin pelas tabs
+        tab_queues = [[] for _ in range(len(pages))]
+        for i, cnpj_data in enumerate(cnpjs):
+            tab_queues[i % len(pages)].append(cnpj_data)
+
+        async def processar_fila(tab_page, fila, tab_idx):
+            for j, cnpj_data in enumerate(fila):
+                cnpj = cnpj_data.get("cnpj", "???")
+                pos = sum(len(tab_queues[t]) for t in range(tab_idx)) + j + 1
+                log.info(f"[MAPS-DIR] ({pos}/{stats['total']}) Tab{tab_idx+1}: buscando {cnpj}...")
+
+                resultado = await _buscar_um_cnpj_maps(tab_page, cnpj_data, semaphore, stats)
+
+                if resultado and resultado.get("maps_data"):
+                    maps_data = resultado["maps_data"]
+                    maps_data["cidade"] = cidade
+                    maps_data["uf"] = uf
+
+                    if callback:
+                        callback(maps_data, cnpj_data)
+
+                # Delay entre buscas
+                await _delay(GMAPS_DIRECTED_DELAY_MIN, GMAPS_DIRECTED_DELAY_MAX)
+
+        # Executar todas as tabs em paralelo
+        tasks = []
+        for idx, (tab_page, fila) in enumerate(zip(pages, tab_queues)):
+            if fila:
+                tasks.append(processar_fila(tab_page, fila, idx))
+
+        await asyncio.gather(*tasks)
+
+    except Exception as e:
+        log.error(f"[MAPS-DIR] ❌ Erro geral: {e}")
+    finally:
+        if browser:
+            await browser.close()
+        if pw:
+            await pw.stop()
+
+    log.info(f"[MAPS-DIR] ═══ RESULTADO BUSCA DIRECIONADA {cidade}/{uf} ═══")
+    log.info(f"  Total CNPJs:      {stats['total']}")
+    log.info(f"  🟢 Encontrados:   {stats['encontrados']}")
+    log.info(f"  🔴 Não encontrados: {stats['nao_encontrados']}")
+    log.info(f"  ❌ Erros:          {stats['erros']}")
+    if stats['total'] > 0:
+        taxa = stats['encontrados'] / stats['total'] * 100
+        log.info(f"  📊 Taxa de match: {taxa:.1f}%")
+
+    return stats

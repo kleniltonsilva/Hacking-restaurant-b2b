@@ -51,6 +51,32 @@ BRASIL_API_CNPJ = f"{BRASIL_API_BASE}/cnpj/v2"
 # iFood - URL base para busca
 IFOOD_SEARCH_URL = "https://www.ifood.com.br/busca"
 
+# cnpj.biz - Detalhamento com telefone do proprietário
+CNPJBIZ_URL = "https://cnpj.biz"
+CNPJBIZ_DELAY_MIN = 5
+CNPJBIZ_DELAY_MAX = 12
+CNPJBIZ_TIMEOUT = 45000
+
+# cnpj.biz - Retry e concorrência (v3.1)
+CNPJBIZ_MAX_RETRIES = 3
+CNPJBIZ_RETRY_BACKOFF = [5, 10, 20]  # segundos entre retries
+CNPJBIZ_CONCURRENT_TABS = 7
+CNPJBIZ_REVEAL_WAIT = 4  # segundos após revealAllContacts()
+CNPJBIZ_CLOUDFLARE_PAUSE_MIN = 30  # pausa quando detecta bloqueio
+CNPJBIZ_CLOUDFLARE_PAUSE_MAX = 60
+
+# Google Maps - Busca direcionada por CNPJ
+GMAPS_DIRECTED_CONCURRENT_TABS = 5
+GMAPS_DIRECTED_DELAY_MIN = 5
+GMAPS_DIRECTED_DELAY_MAX = 12
+GMAPS_DIRECTED_MAX_RETRIES = 2
+GMAPS_DIRECTED_RETRY_BACKOFF = [5, 15]
+GMAPS_DIRECTED_SCORE_MINIMO = 0.50
+GMAPS_DIRECTED_TIMEOUT = 45000
+
+# Diretório de logs
+LOGS_DIR = os.path.join(BASE_DIR, "Logs_secoes")
+
 # ============================================================
 # CAPITAIS BRASILEIRAS (ordenadas por relevância comercial)
 # ============================================================
