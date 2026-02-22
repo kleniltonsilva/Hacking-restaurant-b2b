@@ -2,6 +2,17 @@
 config.py - Configurações globais do Restaurant BI
 """
 import os
+import unicodedata
+
+
+def normalizar_cidade(nome: str) -> str:
+    """Normaliza nome de cidade: UPPER + remove acentos.
+    Essencial para comparar com banco onde cidades estão sem acento."""
+    if not nome:
+        return ""
+    upper = nome.upper().strip()
+    nfkd = unicodedata.normalize('NFKD', upper)
+    return ''.join(c for c in nfkd if not unicodedata.category(c).startswith('M'))
 
 # ============================================================
 # DIRETÓRIOS
@@ -118,3 +129,26 @@ STATUS_PROCESSADO = "processado"       # Google Maps extraído
 STATUS_IFOOD_CHECKED = "ifood_checked"  # iFood verificado
 STATUS_ENRIQUECIDO = "enriquecido"     # CNPJ + Sócios obtidos
 STATUS_ERRO = "erro"
+
+# ============================================================
+# RECEITA FEDERAL - DADOS ABERTOS
+# ============================================================
+# Mirror Casa dos Dados (URL oficial da RF mudou em jan/2026)
+RECEITA_FEDERAL_URL = "https://dados-abertos-rf-cnpj.casadosdados.com.br/arquivos/"
+# URL para descobrir a pasta mais recente
+RECEITA_FEDERAL_INDEX_URL = "https://dados-abertos-rf-cnpj.casadosdados.com.br/arquivos/"
+RECEITA_FEDERAL_DIR = os.path.join(DATA_DIR, "receita_federal")
+os.makedirs(RECEITA_FEDERAL_DIR, exist_ok=True)
+
+# CNAEs de restaurante/alimentação
+CNAES_RESTAURANTE = {"5611201", "5611202", "5611203", "5612100"}
+
+# Número de arquivos de Estabelecimentos (0 a 9)
+NUM_ARQUIVOS_ESTABELECIMENTOS = 10
+
+# UFs brasileiras (para seleção por estado)
+UFS_BRASIL = [
+    "AC", "AL", "AM", "AP", "BA", "CE", "DF", "ES", "GO", "MA",
+    "MG", "MS", "MT", "PA", "PB", "PE", "PI", "PR", "RJ", "RN",
+    "RO", "RR", "RS", "SC", "SE", "SP", "TO",
+]

@@ -5,7 +5,7 @@ Responsável por todas as operações CRUD e consultas.
 import sqlite3
 from datetime import datetime
 from typing import Optional
-from config import DB_PATH, STATUS_PENDENTE
+from config import DB_PATH, STATUS_PENDENTE, normalizar_cidade
 from logger import log
 
 
@@ -340,7 +340,7 @@ def buscar_leads_receita(cidade: str = None, uf: str = None) -> list:
         params = []
         if cidade and uf:
             query += " AND cr.cidade = ? AND cr.uf = ?"
-            params = [cidade.upper(), uf.upper()]
+            params = [normalizar_cidade(cidade), uf.upper()]
         query += " ORDER BY cr.cidade, cr.razao_social"
 
         rows = conn.execute(query, params).fetchall()
@@ -367,7 +367,7 @@ def buscar_leads_detalhados(cidade: str = None, uf: str = None) -> list:
         params = []
         if cidade and uf:
             query += " AND cr.cidade = ? AND cr.uf = ?"
-            params = [cidade.upper(), uf.upper()]
+            params = [normalizar_cidade(cidade), uf.upper()]
         query += " ORDER BY cr.cidade, cr.razao_social"
 
         rows = conn.execute(query, params).fetchall()
@@ -433,7 +433,7 @@ def buscar_cnpjs_para_maps_direcionado(cidade: str, uf: str) -> list:
             AND detalhado = 1 AND matched = 0
             AND logradouro IS NOT NULL AND logradouro != ''
             ORDER BY data_coleta ASC
-        """, (cidade.upper(), uf.upper())).fetchall()
+        """, (normalizar_cidade(cidade), uf.upper())).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()

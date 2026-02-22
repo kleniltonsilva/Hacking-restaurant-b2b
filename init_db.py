@@ -183,6 +183,15 @@ def init_database():
         )
     """)
 
+    # Tabela de controle de atualizações
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS controle_atualizacao (
+            chave TEXT PRIMARY KEY,
+            valor TEXT,
+            data_registro TEXT
+        )
+    """)
+
     # Índices
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_restaurantes_cidade ON restaurantes(cidade, uf)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_restaurantes_status ON restaurantes(status)")

@@ -49,7 +49,8 @@ main.py                 # Orquestrador - menu interativo, pipeline completo
 config.py               # Constantes globais (delays, URLs, capitais, status)
 init_db.py              # Criacao de tabelas SQLite, indices e migracao
 db_manager.py           # CRUD e consultas SQLite (restaurantes, socios, varreduras)
-receita_fetcher.py      # Coleta CNPJs via Casa dos Dados API v5 + cnpj.biz (tel proprietario, UNICA fonte)
+receita_federal.py      # Download e importacao de Dados Abertos da Receita Federal (Estabelecimentos)
+receita_fetcher.py      # Detalhamento CNPJs via cnpj.biz (tel proprietario) + funcoes DB
 gmaps_scraper.py        # Scraping Google Maps via Playwright (generico + direcionado)
 address_matcher.py      # Motor de cruzamento enderecos Receita x Maps (similaridade)
 ifood_checker.py        # Verificacao presenca no iFood via Playwright
@@ -61,20 +62,24 @@ simulacao.py            # Demo visual com dados ficticios de Curitiba/PR
 ## Pipeline de Dados
 
 ```
-[A] Casa dos Dados API v5 (CNAE+cidade+ATIVA) --> cnpjs_receita (dados basicos)
-    - API protegida por Cloudflare -> Playwright resolve challenge
-    - Usa page.evaluate() para chamar API v5 de dentro do browser
-    - Abre UMA sessao de browser para todos os CNAEs (eficiente)
-    - Retorna: CNPJ, razao social, nome fantasia (sem endereco)
-    - Paginacao dinamica: calcula total de paginas baseado na resposta da API
+[A] Dados Abertos Receita Federal --> cnpjs_receita (dados completos)
+    - Baixa Estabelecimentos{0-9}.zip (~500MB cada) do site da RF
+    - Processa CSV dentro do ZIP via streaming (sem descompactar inteiro)
+    - Filtra por CNAE + situacao ATIVA + UF + municipio
+    - Retorna: CNPJ, nome fantasia, endereco, telefone, email, CNAE
+    - 3 modos: Capitais (27), Por Estado (todas cidades), Por Cidades especificas
+    - Mapeamento municipios via Municipios.zip da RF
+    - Baixa 1 ZIP, processa, deleta (economiza disco)
+    - INSERT OR UPDATE: preenche campos vazios em registros existentes
+    - Atualizacao mensal: re-baixar com opcao forcar_download
 
 [B] cnpj.biz (detalha cada CNPJ) --> atualiza cnpjs_receita
-    - FONTE PRIMARIA: telefone do proprietario (O OURO DO SISTEMA)
-    - Preenche: endereco completo, socios, email, telefone, capital social
+    - FONTE PRIMARIA: telefone do proprietario + socios (O OURO DO SISTEMA)
+    - Complementa: socios, tel proprietario, capital social, natureza juridica
     - 7 tabs simultaneas, 3 retries com backoff (5s,10s,20s)
     - Timeout: pausa aleatoria 1.5x-3x do backoff + auto-ajuste global
     - CNPJs com falha: registra tentativas_falha++ para priorizar na proxima varredura
-    - SEM fallback: cnpj.biz e a UNICA fonte (OpenCNPJ removido)
+    - cnpj.biz e a UNICA fonte de detalhamento (Casa dos Dados e OpenCNPJ removidos)
     - _dados_sao_validos(): so marca detalhado=1 se tem endereco/tel/email/socios
 
 [F] Busca Maps Direcionada (RECOMENDADO para pipeline)
@@ -100,8 +105,9 @@ simulacao.py            # Demo visual com dados ficticios de Curitiba/PR
     - Usa nome confirmado: Maps > nome_fantasia > pula MEIs sem nome
     - Resultado salvo em cnpjs_receita (propagado no cruzamento)
 
-[P] Pipeline Completo = A + B + [F ou C+D] + E (automatico) + Exportacao
-    - 3 modos: Direcionado (recomendado), Generico completo, Generico rapido
+[P] Pipeline Completo = A (se sem dados) + B + [F ou C+D] + E (automatico) + Exportacao
+    - Verifica se dados RF ja importados, oferece importar se nao
+    - 3 modos Maps: Direcionado (recomendado), Generico completo, Generico rapido
 ```
 
 ## Banco de Dados (SQLite)
@@ -143,9 +149,15 @@ simulacao.py            # Demo visual com dados ficticios de Curitiba/PR
 - `_buscar_cnpj_no_maps(page, cnpj_data)`: tenta queries, calcula score
 - `_buscar_um_cnpj_maps(page, cnpj_data, semaphore, stats)`: wrapper com retry
 
+### receita_federal.py
+- `importar_receita_federal(modo, cidades_alvo, uf_alvo)`: orquestrador principal
+- `baixar_arquivo(indice)`: baixa Estabelecimentos{indice}.zip com progresso
+- `_processar_zip(zip_path, codigos, ufs, municipios_map)`: filtra e insere no banco
+- `carregar_municipios()`: mapeamento codigo RF -> nome cidade (cacheado)
+- `selecionar_modo_importacao()`: menu interativo (capitais/estado/cidades)
+
 ### receita_fetcher.py
-- `coletar_cnpjs_cidade()`: passo A (Casa dos Dados)
-- `detalhar_cnpjs_cidade()`: passo B (cnpj.biz + OpenCNPJ)
+- `detalhar_cnpjs_cidade()`: passo B (cnpj.biz - tel proprietario + socios)
 - `obter_cnpjs_nao_detalhados()`: ORDER BY tentativas_falha DESC (prioriza falhas)
 - `registrar_falha_cnpj()`: incrementa tentativas_falha + timestamp
 
@@ -158,35 +170,35 @@ simulacao.py            # Demo visual com dados ficticios de Curitiba/PR
 - Processamento **incremental**: nunca re-processa dados ja coletados
 - CNAEs de restaurante: 5611201, 5611202, 5611203, 5612100
 - Nomes de cidades sao normalizados (acentos removidos) antes de enviar para APIs
-- Detalhamento usa cnpj.biz como fonte primaria, OpenCNPJ como fallback
+- Detalhamento usa cnpj.biz como fonte unica (OpenCNPJ e Casa dos Dados removidos)
 - Todos os modulos usam `from logger import log` em vez de print
 - Logs: `logger.py` -> terminal + `Logs_secoes/logs_YYYY-MM-DD.txt` (append por dia)
 
 ## Diretorios
 
 ```
-data/            # Banco SQLite (restaurants.db)
-exports/         # Arquivos Excel/CSV exportados
-Logs_secoes/     # Logs diarios (logs_YYYY-MM-DD.txt)
-.venv/           # Ambiente virtual Python
-__pycache__/     # Cache Python
+data/                    # Banco SQLite (restaurants.db) + municipios_rf.json
+data/receita_federal/    # ZIPs temporarios da RF (baixados e deletados)
+exports/                 # Arquivos Excel/CSV exportados
+Logs_secoes/             # Logs diarios (logs_YYYY-MM-DD.txt)
+.venv/                   # Ambiente virtual Python
+__pycache__/             # Cache Python
 ```
 
-## APIs Externas
+## Fontes de Dados
 
-- **Casa dos Dados v5**: `POST https://api.casadosdados.com.br/v5/public/cnpj/pesquisa`
-  - Busca CNPJs por CNAE+cidade+situacao
-  - Protegida por Cloudflare (requer Playwright para resolver challenge)
-  - Payload: `codigo_atividade_principal`, `uf`, `municipio`, `situacao_cadastral`, `pagina`
-  - Resposta: `{"total": N, "cnpjs": [{"cnpj", "razao_social", "nome_fantasia", "situacao_cadastral"}]}`
-  - 20 resultados por pagina, max 500 paginas por CNAE (10.000 resultados)
-  - Municipios sem acento e em UPPERCASE (ex: "SAO PAULO", nao "SÃO PAULO")
+- **Dados Abertos Receita Federal**: `https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/`
+  - 10 arquivos Estabelecimentos (ZIP ~500MB cada), Municipios.zip
+  - CSV com separador `;`, encoding latin-1, sem header
+  - CNPJ = cnpj_basico(8) + cnpj_ordem(4) + cnpj_dv(2) = 14 digitos
+  - situacao_cadastral '02' = ATIVA
+  - Municipio = codigo RF (mapeado via Municipios.zip)
+  - Atualizacao mensal pela Receita Federal
 - **cnpj.biz**: `GET https://cnpj.biz/{cnpj}` (scraping via Playwright)
-  - FONTE PRIMARIA de detalhamento (tel proprietario!)
+  - FONTE UNICA de detalhamento (tel proprietario + socios)
   - Protegida por Cloudflare (requer Playwright)
-  - Dados: endereco, socios, email, telefone proprietario, capital social, tipo empresa
+  - Dados: socios, telefone proprietario, capital social, natureza juridica
   - Config: 7 tabs, delay 5-12s, 3 retries, backoff [5,10,20]s
-- **OpenCNPJ**: `GET https://api.opencnpj.org/{cnpj}` (DESATIVADO - codigo mantido mas nao usado)
 - **Google Maps**: scraping via Playwright (nao e API oficial)
   - Busca direcionada: 5 tabs, delay 5-12s, 2 retries, score minimo 0.50
   - Busca generica: delay 8-20s, scroll infinito
@@ -194,7 +206,7 @@ __pycache__/     # Cache Python
 
 ## Convencoes
 
-- Logs usam prefixos: `[LOG]`, `[DB]`, `[RECEITA]`, `[DETALHE]`, `[MATCH]`, `[MAPS-DIR]`, `[iFood]`, `[EXPORT]`, `[ERRO]`, `[WARN]`
+- Logs usam prefixos: `[LOG]`, `[DB]`, `[RF]`, `[DETALHE]`, `[MATCH]`, `[MAPS-DIR]`, `[iFood]`, `[EXPORT]`, `[ERRO]`, `[WARN]`
 - Cidades armazenadas em UPPERCASE na tabela cnpjs_receita
 - Score minimo de match: 0.55 (generico) / 0.50 (direcionado)
 - Delays configurados em config.py (GMAPS_DIRECTED_*, CNPJBIZ_*, MIN_DELAY/MAX_DELAY)
@@ -205,8 +217,7 @@ __pycache__/     # Cache Python
 - `receita_fetcher.py` duplica a criacao de tabelas que ja existe em `init_db.py` (via `init_tabela_receita()`)
 - `simulacao.py` e apenas para demonstracao, nao afeta o banco real (usa `simulacao.db`)
 - O scraping do Google Maps pode ser bloqueado - o sistema usa tecnicas stealth mas nao ha garantia
-- Rate limiting da OpenCNPJ: ~50 req/s permitido, mas o codigo usa delays conservadores
-- Casa dos Dados API v5 retorna apenas dados basicos (sem endereco) - o endereco vem do cnpj.biz na etapa B
+- Dados Abertos RF ja trazem endereco/telefone/email - cnpj.biz complementa com socios e tel proprietario
 - cnpj.biz pode bloquear por excesso de requisicoes - delays configurados em config.py
 - `init_db.py` inclui funcao `_migrar_banco()` que adiciona colunas novas em bancos existentes via ALTER TABLE
 - Busca direcionada usa 5 tabs (menos que cnpj.biz) porque Google detecta bots mais facilmente

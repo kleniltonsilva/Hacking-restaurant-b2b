@@ -1,54 +1,28 @@
 """
-receita_fetcher.py - Motor de coleta de CNPJs de restaurantes por cidade
-v3.0 - Casa dos Dados API v5 + cnpj.biz (telefone proprietário) + OpenCNPJ fallback
+receita_fetcher.py - Detalhamento de CNPJs via cnpj.biz + funções de banco
+v3.1 - cnpj.biz (telefone proprietário) como fonte de detalhamento
 
 ESTRATÉGIA:
-1. Busca na Casa dos Dados (API v5): CNAE + cidade + ATIVA → lista de CNPJs
-   - API v5 retorna dados básicos (CNPJ, razão social, nome fantasia)
-   - Protegida por Cloudflare → usa Playwright + page.evaluate() como bypass
-   - Abre UMA sessão de browser e busca todos os CNAEs reaproveitando
-2. Salva CNPJs na tabela cnpjs_receita (incremental, só novos)
-3. Detalhamento via cnpj.biz: endereço, sócios, TELEFONE DO PROPRIETÁRIO
+1. CNPJs importados via dados abertos da Receita Federal (receita_federal.py)
+2. Detalhamento via cnpj.biz: sócios, TELEFONE DO PROPRIETÁRIO, dados complementares
    - cnpj.biz contém telefone pessoal do proprietário (o ouro do sistema)
-   - Fallback: OpenCNPJ para CNPJs que falharam no cnpj.biz
-
-CNAEs DE RESTAURANTE:
-- 5611201: Restaurantes e similares
-- 5611202: Bares e estabelecimentos de bebidas
-- 5611203: Lanchonetes, casas de chá/suco
-- 5612100: Serviços ambulantes de alimentação
 """
 import asyncio
 import json
-import math
 import random
 import re
 import sqlite3
-import unicodedata
 from datetime import datetime
 
-import httpx
 from playwright.async_api import async_playwright
 
 from config import (
-    DB_PATH, USER_AGENTS,
+    DB_PATH, USER_AGENTS, normalizar_cidade,
     CNPJBIZ_URL, CNPJBIZ_DELAY_MIN, CNPJBIZ_DELAY_MAX, CNPJBIZ_TIMEOUT,
     CNPJBIZ_MAX_RETRIES, CNPJBIZ_RETRY_BACKOFF, CNPJBIZ_CONCURRENT_TABS,
     CNPJBIZ_REVEAL_WAIT, CNPJBIZ_CLOUDFLARE_PAUSE_MIN, CNPJBIZ_CLOUDFLARE_PAUSE_MAX,
 )
 from logger import log
-
-
-# ============================================================
-# CNAEs DE RESTAURANTE / ALIMENTAÇÃO
-# ============================================================
-
-CNAES_RESTAURANTE = [
-    "5611201",  # Restaurantes e similares
-    "5611202",  # Bar e outros estab. especializados em servir bebidas
-    "5611203",  # Lanchonetes, casas de chá, de sucos e similares
-    "5612100",  # Serviços ambulantes de alimentação
-]
 
 
 # ============================================================
@@ -189,7 +163,7 @@ def cnpjs_existentes_cidade(cidade: str, uf: str) -> set:
     try:
         rows = conn.execute(
             "SELECT cnpj FROM cnpjs_receita WHERE cidade = ? AND uf = ?",
-            (cidade.upper(), uf.upper())
+            (normalizar_cidade(cidade), uf.upper())
         ).fetchall()
         return {row["cnpj"] for row in rows}
     finally:
@@ -351,29 +325,11 @@ def obter_cnpjs_cidade(cidade: str, uf: str) -> list:
             SELECT * FROM cnpjs_receita
             WHERE cidade = ? AND uf = ? AND situacao_cadastral = 'ATIVA'
             ORDER BY logradouro, numero
-        """, (cidade.upper(), uf.upper())).fetchall()
+        """, (normalizar_cidade(cidade), uf.upper())).fetchall()
         return [dict(row) for row in rows]
     finally:
         conn.close()
 
-
-def resetar_entries_opencnpj(cidade: str, uf: str) -> int:
-    """Marca entries detalhadas via OpenCNPJ como pendentes de re-detalhamento via cnpj.biz.
-    Retorna o número de entries resetadas."""
-    conn = _get_connection()
-    try:
-        cursor = conn.execute("""
-            UPDATE cnpjs_receita
-            SET detalhado = 0
-            WHERE cidade = ? AND uf = ? AND fonte_detalhamento = 'opencnpj'
-        """, (cidade.upper(), uf.upper()))
-        conn.commit()
-        resetados = cursor.rowcount
-        if resetados > 0:
-            log.info(f"[RECEITA] 🔄 {resetados} entries OpenCNPJ marcadas para re-detalhamento via cnpj.biz")
-        return resetados
-    finally:
-        conn.close()
 
 
 def obter_cnpjs_nao_detalhados(cidade: str, uf: str, limite: int = 0) -> list:
@@ -387,7 +343,7 @@ def obter_cnpjs_nao_detalhados(cidade: str, uf: str, limite: int = 0) -> list:
             WHERE cidade = ? AND uf = ? AND detalhado = 0
             ORDER BY tentativas_falha DESC, data_coleta ASC
         """
-        params = [cidade.upper(), uf.upper()]
+        params = [normalizar_cidade(cidade), uf.upper()]
         if limite > 0:
             query += " LIMIT ?"
             params.append(limite)
@@ -421,7 +377,7 @@ def estatisticas_receita(cidade: str = None, uf: str = None) -> dict:
         params = []
         if cidade and uf:
             where = "WHERE cidade = ? AND uf = ?"
-            params = [cidade.upper(), uf.upper()]
+            params = [normalizar_cidade(cidade), uf.upper()]
 
         total = conn.execute(
             f"SELECT COUNT(*) FROM cnpjs_receita {where}", params
@@ -466,388 +422,59 @@ def estatisticas_receita(cidade: str = None, uf: str = None) -> dict:
         conn.close()
 
 
-# ============================================================
-# PASSO 1: BUSCAR CNPJs NA CASA DOS DADOS (API v5)
-# ============================================================
-
-# Descrições dos CNAEs para log
-CNAE_DESC = {
-    "5611201": "Restaurantes",
-    "5611202": "Bares",
-    "5611203": "Lanchonetes",
-    "5612100": "Ambulantes",
-}
-
-# Limite de segurança absoluto (500 páginas = 10.000 resultados)
-MAX_PAGINAS_SEGURANCA = 500
-
-
-def _remover_acentos(texto: str) -> str:
-    """Remove acentos de um texto (ex: São Paulo → SAO PAULO)."""
-    nfkd = unicodedata.normalize('NFKD', texto)
-    return ''.join(c for c in nfkd if not unicodedata.category(c).startswith('M'))
-
-
-def _build_v5_payload(cidade: str, uf: str, cnae: str, pagina: int = 1) -> dict:
-    """Monta o payload para a API v5 da Casa dos Dados."""
-    return {
-        "cnpj": [],
-        "cnpj_raiz": [],
-        "situacao_cadastral": ["ATIVA"],
-        "codigo_atividade_principal": [cnae],
-        "codigo_natureza_juridica": [],
-        "incluir_atividade_secundaria": False,
-        "uf": [uf.upper()],
-        "municipio": [_remover_acentos(cidade).upper()],
-        "bairro": [],
-        "cep": [],
-        "ddd": [],
-        "data_abertura": {},
-        "capital_social": {"minimo": 0, "maximo": 0},
-        "mei": {"optante": None, "data_opcao": None},
-        "simples": {"optante": None, "data_opcao": None},
-        "somente_fixo": False,
-        "somente_celular": False,
-        "somente_matriz": False,
-        "somente_filial": False,
-        "com_email": False,
-        "com_contato_telefonico": False,
-        "pagina": pagina,
-    }
-
-
-async def _buscar_casa_dos_dados_api(cidade: str, uf: str, cnae: str,
-                                      pagina: int = 1) -> tuple:
-    """
-    Tenta a API v5 direta da Casa dos Dados.
-    POST https://api.casadosdados.com.br/v5/public/cnpj/pesquisa
-    Geralmente bloqueada por Cloudflare. Nesse caso, retorna listas vazias.
-
-    Returns:
-        tuple(list[dict], int): (lista de CNPJs, total encontrado)
-    """
-    url = "https://api.casadosdados.com.br/v5/public/cnpj/pesquisa"
-    payload = _build_v5_payload(cidade, uf, cnae, pagina)
-
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(url, json=payload, headers={
-                "User-Agent": random.choice(USER_AGENTS),
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Origin": "https://casadosdados.com.br",
-                "Referer": "https://casadosdados.com.br/",
-            })
-
-            if resp.status_code == 200:
-                data = resp.json()
-                cnpjs = data.get("cnpjs", [])
-                total = data.get("total", 0)
-                return cnpjs if isinstance(cnpjs, list) else [], total
-
-    except Exception:
-        pass
-
-    return [], 0
-
-
-async def _buscar_via_playwright(cidade: str, uf: str, cnaes: list) -> dict:
-    """
-    Usa Playwright para resolver Cloudflare e chama API v5 via page.evaluate().
-    Abre UMA sessão de browser e busca todos os CNAEs reaproveitando a sessão.
-
-    Returns:
-        dict[cnae] -> list[dict]: CNPJs encontrados por CNAE
-    """
-    resultados = {}
-    pw = None
-    browser = None
-
-    try:
-        pw = await async_playwright().start()
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
-        )
-        context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={"width": 1366, "height": 768},
-            locale="pt-BR",
-        )
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """)
-
-        page = await context.new_page()
-
-        # Navegar para resolver Cloudflare e obter cookies de sessão
-        await page.goto(
-            "https://casadosdados.com.br/solucao/cnpj/pesquisa-avancada",
-            wait_until="networkidle", timeout=45000
-        )
-        await asyncio.sleep(random.uniform(2, 4))
-
-        # Verificar se passou do Cloudflare
-        content = await page.content()
-        if "Just a moment" in content:
-            log.warning("[RECEITA] ⚠️ Cloudflare não foi resolvido, tentando aguardar...")
-            await asyncio.sleep(10)
-
-        # Buscar cada CNAE via fetch() no contexto do browser
-        for cnae in cnaes:
-            cnae_desc = CNAE_DESC.get(cnae, cnae)
-            all_cnpjs = []
-            total_api = 0
-            pagina = 1
-            max_paginas = MAX_PAGINAS_SEGURANCA
-
-            while pagina <= max_paginas:
-                payload = _build_v5_payload(cidade, uf, cnae, pagina)
-                payload_json = json.dumps(payload, ensure_ascii=False)
-
-                result = await page.evaluate("""async (payloadStr) => {
-                    try {
-                        const resp = await fetch(
-                            'https://api.casadosdados.com.br/v5/public/cnpj/pesquisa',
-                            {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: payloadStr,
-                            }
-                        );
-                        if (resp.ok) {
-                            return {status: resp.status, body: await resp.text()};
-                        }
-                        return {status: resp.status, body: ''};
-                    } catch(e) {
-                        return {status: 0, body: e.message};
-                    }
-                }""", payload_json)
-
-                if result["status"] == 200 and result["body"]:
-                    try:
-                        data = json.loads(result["body"])
-                    except json.JSONDecodeError:
-                        log.warning(f"[RECEITA] ⚠️ Resposta inválida para CNAE {cnae} p.{pagina}")
-                        break
-
-                    cnpjs_pagina = data.get("cnpjs", [])
-                    total_api = data.get("total", 0)
-                    all_cnpjs.extend(cnpjs_pagina)
-
-                    if pagina == 1:
-                        max_paginas = min(math.ceil(total_api / 20), MAX_PAGINAS_SEGURANCA)
-                        log.info(f"[RECEITA] 📊 CNAE {cnae} ({cnae_desc}): {total_api} ATIVAS encontradas ({max_paginas} páginas)")
-
-                    # Última página: menos de 20 resultados ou já buscou tudo
-                    if len(cnpjs_pagina) < 20 or len(all_cnpjs) >= total_api:
-                        break
-
-                    pagina += 1
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
-                else:
-                    if pagina == 1:
-                        log.warning(f"[RECEITA] ⚠️ API v5 falhou para CNAE {cnae}: status={result['status']}")
-                    break
-
-            resultados[cnae] = all_cnpjs
-            if pagina > 1:
-                await asyncio.sleep(random.uniform(1, 3))
-
-    except Exception as e:
-        log.warning(f"[RECEITA] ⚠️ Playwright falhou: {e}")
-
-    finally:
-        if browser:
-            await browser.close()
-        if pw:
-            await pw.stop()
-
-    return resultados
-
-
-def _normalizar_resultado_v5(empresa: dict, cidade: str, uf: str, cnae: str) -> dict:
-    """Normaliza um resultado da API v5 da Casa dos Dados para nosso formato.
-    A v5 retorna dados mínimos (sem endereço). Endereço será preenchido pelo OpenCNPJ."""
-    cnpj_raw = empresa.get("cnpj", "")
-    cnpj_limpo = re.sub(r'[^\d]', '', str(cnpj_raw))
-
-    # Situação cadastral na v5 pode ser string ou dict
-    situacao = empresa.get("situacao_cadastral", "ATIVA")
-    if isinstance(situacao, dict):
-        situacao = situacao.get("situacao_atual", "ATIVA")
-
-    return {
-        "cnpj": cnpj_limpo,
-        "razao_social": empresa.get("razao_social", "") or "",
-        "nome_fantasia": empresa.get("nome_fantasia", "") or "",
-        "situacao_cadastral": situacao or "ATIVA",
-        "cnae_principal": cnae,
-        "logradouro": "",
-        "numero": "",
-        "complemento": "",
-        "bairro": "",
-        "cep": "",
-        "cidade": cidade.upper(),
-        "uf": uf.upper(),
-        "endereco_completo": "",
-        "email": "",
-        "telefone1": "",
-        "telefone2": "",
-        "capital_social": 0,
-        "porte": "",
-        "natureza_juridica": "",
-        "data_abertura": "",
-    }
-
-
-# ============================================================
-# PIPELINE PRINCIPAL: COLETAR CNPJs DE UMA CIDADE
-# ============================================================
-
-async def coletar_cnpjs_cidade(cidade: str, uf: str) -> dict:
-    """
-    Coleta TODOS os CNPJs de restaurantes ativos em uma cidade.
-
-    ESTRATÉGIA:
-    1. Tenta API v5 direta (geralmente bloqueada por Cloudflare)
-    2. Fallback: abre Playwright UMA VEZ e busca todos os CNAEs via page.evaluate()
-
-    A v5 retorna apenas dados básicos (CNPJ, razão social, nome fantasia).
-    Endereço e sócios são preenchidos depois via OpenCNPJ (passo B do pipeline).
-
-    INCREMENTAL: Compara com o que já tem no banco e só insere novos.
-
-    Returns:
-        dict com estatísticas: total_encontrados, novos, ja_existiam
-    """
-    init_tabela_receita()
-
-    # CNPJs que já temos
-    cnpjs_existentes = cnpjs_existentes_cidade(cidade, uf)
-    log.info(f"[RECEITA] 📊 Base atual: {len(cnpjs_existentes)} CNPJs de {cidade}/{uf}")
-
-    total_encontrados = 0
-    total_novos = 0
-    total_ja_existiam = 0
-
-    # Primeiro: tentar API direta para o primeiro CNAE (teste rápido)
-    test_cnpjs, test_total = await _buscar_casa_dos_dados_api(cidade, uf, CNAES_RESTAURANTE[0], 1)
-    api_direta_funciona = len(test_cnpjs) > 0
-
-    if api_direta_funciona:
-        log.info(f"[RECEITA] ✅ API direta funcionando!")
-        # Usar API direta para todos os CNAEs
-        for cnae in CNAES_RESTAURANTE:
-            cnae_desc = CNAE_DESC.get(cnae, cnae)
-            log.info(f"[RECEITA] 🔍 CNAE {cnae} ({cnae_desc}) em {cidade}/{uf}...")
-
-            total_cnae = 0
-            novos_cnae = 0
-            pagina = 1
-            max_paginas = MAX_PAGINAS_SEGURANCA
-
-            while pagina <= max_paginas:
-                if cnae == CNAES_RESTAURANTE[0] and pagina == 1:
-                    cnpjs_pagina, total_api = test_cnpjs, test_total
-                else:
-                    cnpjs_pagina, total_api = await _buscar_casa_dos_dados_api(
-                        cidade, uf, cnae, pagina
-                    )
-
-                if not cnpjs_pagina:
-                    break
-
-                if pagina == 1:
-                    max_paginas = min(math.ceil(total_api / 20), MAX_PAGINAS_SEGURANCA) if total_api > 0 else 1
-                    log.info(f"[RECEITA] 📊 {total_api} ATIVAS encontradas ({max_paginas} páginas)")
-
-                for emp in cnpjs_pagina:
-                    dados = _normalizar_resultado_v5(emp, cidade, uf, cnae)
-                    if not dados["cnpj"] or len(dados["cnpj"]) != 14:
-                        continue
-                    total_cnae += 1
-                    if dados["cnpj"] in cnpjs_existentes:
-                        total_ja_existiam += 1
-                        continue
-                    if inserir_cnpj_receita(dados):
-                        novos_cnae += 1
-                        cnpjs_existentes.add(dados["cnpj"])
-
-                if len(cnpjs_pagina) < 20:
-                    break
-                pagina += 1
-                await asyncio.sleep(random.uniform(1, 3))
-
-            total_encontrados += total_cnae
-            total_novos += novos_cnae
-            log.info(f"[RECEITA] ✅ CNAE {cnae}: {total_cnae} encontrados, {novos_cnae} novos")
-            _registrar_varredura(cidade, uf, cnae, total_cnae, novos_cnae)
-            await asyncio.sleep(random.uniform(2, 4))
-    else:
-        # API bloqueada → usar Playwright (uma sessão para todos os CNAEs)
-        log.warning(f"[RECEITA] ⚠️ API bloqueada por Cloudflare, usando Playwright...")
-        resultados_pw = await _buscar_via_playwright(cidade, uf, CNAES_RESTAURANTE)
-
-        for cnae in CNAES_RESTAURANTE:
-            cnae_desc = CNAE_DESC.get(cnae, cnae)
-            cnpjs_cnae = resultados_pw.get(cnae, [])
-            total_cnae = 0
-            novos_cnae = 0
-
-            for emp in cnpjs_cnae:
-                dados = _normalizar_resultado_v5(emp, cidade, uf, cnae)
-                if not dados["cnpj"] or len(dados["cnpj"]) != 14:
-                    continue
-                total_cnae += 1
-                if dados["cnpj"] in cnpjs_existentes:
-                    total_ja_existiam += 1
-                    continue
-                if inserir_cnpj_receita(dados):
-                    novos_cnae += 1
-                    cnpjs_existentes.add(dados["cnpj"])
-
-            total_encontrados += total_cnae
-            total_novos += novos_cnae
-            log.info(f"[RECEITA] ✅ CNAE {cnae} ({cnae_desc}): {total_cnae} encontrados, {novos_cnae} novos")
-            _registrar_varredura(cidade, uf, cnae, total_cnae, novos_cnae)
-
-    # Resumo
-    stats = {
-        "total_encontrados": total_encontrados,
-        "novos": total_novos,
-        "ja_existiam": total_ja_existiam,
-        "base_total": len(cnpjs_existentes),
-    }
-
-    log.info(f"[RECEITA] ═══ RESUMO {cidade}/{uf} ═══")
-    log.info(f"  Encontrados nesta varredura: {total_encontrados}")
-    log.info(f"  Novos inseridos: {total_novos}")
-    log.info(f"  Já existiam no banco: {total_ja_existiam}")
-    log.info(f"  Base total agora: {stats['base_total']}")
-
-    return stats
-
-
-def _registrar_varredura(cidade: str, uf: str, cnae: str,
-                          total_cnae: int, novos_cnae: int):
-    """Registra uma varredura no banco de controle."""
-    conn = _get_connection()
-    try:
-        conn.execute("""
-            INSERT OR REPLACE INTO varreduras_receita
-            (cidade, uf, cnae, total_encontrados, novos_inseridos, data_varredura)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (cidade.upper(), uf.upper(), cnae, total_cnae, novos_cnae,
-              datetime.now().isoformat()))
-        conn.commit()
-    finally:
-        conn.close()
 
 
 # ============================================================
 # PASSO 2: DETALHAR CNPJs VIA cnpj.biz (TELEFONE PROPRIETÁRIO)
 # ============================================================
+
+# Constantes de resiliência v3.2
+CHUNK_SIZE = 200  # CNPJs por lote antes de reiniciar browser
+CHUNK_COOLDOWN_MIN = 60  # segundos entre chunks
+CHUNK_COOLDOWN_MAX = 120
+PERIODIC_PAUSE_EVERY = 100  # pausa a cada N sucessos
+PERIODIC_PAUSE_MIN = 30
+PERIODIC_PAUSE_MAX = 60
+CRASH_PAUSE_MIN = 90  # pausa apos crash/bloqueio
+CRASH_PAUSE_MAX = 120
+MAX_DELAY_MULTIPLIER = 8.0  # limite maximo do delay_extra
+CONSECUTIVE_FAIL_THRESHOLD = 5  # falhas consecutivas antes de pausa longa
+CONSECUTIVE_FAIL_PAUSE_MIN = 120
+CONSECUTIVE_FAIL_PAUSE_MAX = 180
+
+# Viewports aleatorios para variar fingerprint
+VIEWPORTS = [
+    {"width": 1366, "height": 768},
+    {"width": 1440, "height": 900},
+    {"width": 1536, "height": 864},
+    {"width": 1920, "height": 1080},
+    {"width": 1280, "height": 720},
+]
+
+
+def _dados_embaralhados(texto: str) -> bool:
+    """Detecta se os dados estao embaralhados (anti-scraping do cnpj.biz).
+    Verifica padroes invalidos como sequencias de consoantes sem sentido."""
+    if not texto:
+        return False
+    # Procurar ruas/logradouros com consoantes sem sentido
+    import re as _re
+    # Extrair texto apos "Logradouro" ou "Endereco"
+    match = _re.search(r'(?:logradouro|endere[cç]o)\s*[:\-]?\s*(.{5,60})', texto, _re.IGNORECASE)
+    if not match:
+        return False
+    trecho = match.group(1).strip()
+    # Mais de 4 consoantes consecutivas (improvavel em portugues)
+    consoantes = _re.findall(r'[bcdfghjklmnpqrstvwxyz]{4,}', trecho.lower())
+    if len(consoantes) >= 2:
+        return True
+    # Verificar se parece aleatório: muitas consoantes raras juntas
+    for seq in consoantes:
+        raras = sum(1 for c in seq if c in 'kwyxzqj')
+        if raras >= 2:
+            return True
+    return False
+
 
 async def _detectar_cloudflare(page) -> bool:
     """Detecta se a pagina esta mostrando challenge Cloudflare."""
@@ -863,8 +490,10 @@ async def _detectar_cloudflare(page) -> bool:
 
 async def _detalhar_um_cnpj_biz(page, cnpj: str, idx: int, total: int,
                                  semaphore, resultados: dict,
-                                 falhas_consecutivas: list, delay_extra: list):
-    """Detalha UM CNPJ via cnpj.biz em uma tab individual com retry."""
+                                 falhas_consecutivas: list, delay_extra: list,
+                                 sucessos_contador: list, needs_restart: list):
+    """Detalha UM CNPJ via cnpj.biz em uma tab individual com retry.
+    needs_restart[0] = True sinaliza ao batch que browser precisa reiniciar."""
     cnpj_limpo = re.sub(r'[^\d]', '', cnpj)
     url = f"{CNPJBIZ_URL}/{cnpj_limpo}"
 
@@ -886,14 +515,18 @@ async def _detalhar_um_cnpj_biz(page, cnpj: str, idx: int, total: int,
                     falhas_consecutivas[0] += 1
                     pausa = random.uniform(CNPJBIZ_CLOUDFLARE_PAUSE_MIN,
                                            CNPJBIZ_CLOUDFLARE_PAUSE_MAX)
-                    log.warning(f"[DETALHE] 🛑 Cloudflare detectado para {cnpj_limpo} "
+                    log.warning(f"[DETALHE] Cloudflare detectado para {cnpj_limpo} "
                           f"(tentativa {tentativa+1}/{CNPJBIZ_MAX_RETRIES}) - pausando {pausa:.0f}s")
 
-                    # Auto-ajuste: se >3 falhas seguidas, aumentar delays 50%
+                    # Auto-ajuste: se >=3 falhas seguidas, aumentar delays
                     if falhas_consecutivas[0] >= 3:
-                        delay_extra[0] = min(delay_extra[0] * 1.5, 4.0)
-                        log.debug(f"[DETALHE] ⚙️ Auto-ajuste: delays multiplicados por {delay_extra[0]:.1f}x")
+                        delay_extra[0] = min(delay_extra[0] * 1.5, MAX_DELAY_MULTIPLIER)
+                        log.debug(f"[DETALHE] Auto-ajuste: delays multiplicados por {delay_extra[0]:.1f}x")
                         falhas_consecutivas[0] = 0
+
+                    # Se muitas falhas consecutivas, sinalizar restart
+                    if falhas_consecutivas[0] >= CONSECUTIVE_FAIL_THRESHOLD:
+                        needs_restart[0] = True
 
                     await asyncio.sleep(pausa)
                     continue
@@ -926,131 +559,177 @@ async def _detalhar_um_cnpj_biz(page, cnpj: str, idx: int, total: int,
                     "() => document.body ? document.body.innerText : ''"
                 ) or ""
 
+                # Detectar dados embaralhados (anti-scraping)
+                if _dados_embaralhados(text):
+                    log.warning(f"[DETALHE] Dados embaralhados detectados para {cnpj_limpo} - sinalizando restart")
+                    needs_restart[0] = True
+                    registrar_falha_cnpj(cnpj_limpo)
+                    return
+
                 dados = _extrair_dados_cnpjbiz(text, content)
                 if dados:
                     dados["fonte_detalhamento"] = "cnpjbiz"
                     resultados[cnpj_limpo] = dados
                     falhas_consecutivas[0] = 0  # Reset falhas
+                    sucessos_contador[0] += 1
 
                     tel_prop = dados.get("telefone_proprietario", "")
                     tel_info = f" | TEL PROP: {tel_prop}" if tel_prop else ""
                     end_info = f" | END: {dados.get('logradouro', '')[:20]}" if dados.get("logradouro") else ""
-                    log.info(f"[DETALHE] ✅ ({idx+1}/{total}) {cnpj_limpo}{tel_info}{end_info}")
+                    log.info(f"[DETALHE] ({idx+1}/{total}) {cnpj_limpo}{tel_info}{end_info}")
+
+                    # Pausa periodica a cada N sucessos
+                    if sucessos_contador[0] > 0 and sucessos_contador[0] % PERIODIC_PAUSE_EVERY == 0:
+                        pausa = random.uniform(PERIODIC_PAUSE_MIN, PERIODIC_PAUSE_MAX)
+                        log.info(f"[DETALHE] Pausa periodica ({sucessos_contador[0]} processados) - {pausa:.0f}s")
+                        await asyncio.sleep(pausa)
+
                     return  # Sucesso, sair do loop de retry
 
                 else:
-                    log.warning(f"[DETALHE] ❌ ({idx+1}/{total}) {cnpj_limpo}: sem dados "
+                    log.warning(f"[DETALHE] ({idx+1}/{total}) {cnpj_limpo}: sem dados "
                           f"(tentativa {tentativa+1}/{CNPJBIZ_MAX_RETRIES})")
                     if tentativa < CNPJBIZ_MAX_RETRIES - 1:
                         backoff = CNPJBIZ_RETRY_BACKOFF[min(tentativa, len(CNPJBIZ_RETRY_BACKOFF)-1)]
-                        log.info(f"[DETALHE] 🔄 Retry em {backoff}s...")
+                        log.info(f"[DETALHE] Retry em {backoff}s...")
                         await asyncio.sleep(backoff)
 
             except Exception as e:
                 falhas_consecutivas[0] += 1
-                is_timeout = "Timeout" in str(e) or "timeout" in str(e)
-                log.warning(f"[DETALHE] ⚠️ ({idx+1}/{total}) {cnpj_limpo}: {e} "
+                erro_str = str(e)
+                is_timeout = "Timeout" in erro_str or "timeout" in erro_str
+                is_crash = any(s in erro_str for s in [
+                    "Connection closed", "Target page", "crashed",
+                    "ERR_UNEXPECTED_PROXY_AUTH", "browser has been closed",
+                    "Target closed", "Session closed",
+                ])
+
+                log.warning(f"[DETALHE] ({idx+1}/{total}) {cnpj_limpo}: {e} "
                       f"(tentativa {tentativa+1}/{CNPJBIZ_MAX_RETRIES})")
+
+                # Browser crash: sinalizar restart imediato
+                if is_crash:
+                    log.warning(f"[DETALHE] Browser crash detectado - sinalizando restart")
+                    needs_restart[0] = True
+                    registrar_falha_cnpj(cnpj_limpo)
+                    return
 
                 if tentativa < CNPJBIZ_MAX_RETRIES - 1:
                     backoff = CNPJBIZ_RETRY_BACKOFF[min(tentativa, len(CNPJBIZ_RETRY_BACKOFF)-1)]
                     if is_timeout:
-                        # Pausa aleatoria mais longa para timeouts
                         pausa_timeout = random.uniform(backoff * 1.5, backoff * 3)
-                        log.info(f"[DETALHE] ⏳ Timeout detectado - pausa de {pausa_timeout:.0f}s antes de retry...")
+                        log.info(f"[DETALHE] Timeout - pausa de {pausa_timeout:.0f}s antes de retry...")
                         await asyncio.sleep(pausa_timeout)
                     else:
                         await asyncio.sleep(backoff)
 
-                    # Auto-ajuste global: se muitos timeouts, aumentar delays
+                    # Auto-ajuste global
                     if falhas_consecutivas[0] >= 3:
-                        delay_extra[0] = min(delay_extra[0] * 1.5, 4.0)
-                        log.warning(f"[DETALHE] ⚙️ Auto-ajuste: delays multiplicados por {delay_extra[0]:.1f}x")
+                        delay_extra[0] = min(delay_extra[0] * 1.5, MAX_DELAY_MULTIPLIER)
+                        log.warning(f"[DETALHE] Auto-ajuste: delays multiplicados por {delay_extra[0]:.1f}x")
                         falhas_consecutivas[0] = 0
 
-    # Todas as tentativas falharam - registrar falha para priorizar na proxima varredura
+                    # Muitas falhas consecutivas: sinalizar restart
+                    if falhas_consecutivas[0] >= CONSECUTIVE_FAIL_THRESHOLD:
+                        needs_restart[0] = True
+
+    # Todas as tentativas falharam
     registrar_falha_cnpj(cnpj_limpo)
-    log.error(f"[DETALHE] 💀 ({idx+1}/{total}) {cnpj_limpo}: FALHOU apos {CNPJBIZ_MAX_RETRIES} tentativas "
+    log.error(f"[DETALHE] ({idx+1}/{total}) {cnpj_limpo}: FALHOU apos {CNPJBIZ_MAX_RETRIES} tentativas "
               f"(sera priorizado na proxima varredura)")
 
 
-async def _detalhar_cnpjbiz_batch(cnpjs: list) -> dict:
-    """
-    Detalha CNPJs via cnpj.biz usando Playwright com 7 tabs simultaneas.
-    Retry inteligente com backoff, deteccao de bloqueio Cloudflare,
-    auto-ajuste de delays.
+async def _criar_browser_cnpjbiz(pw):
+    """Cria browser + context com fingerprint aleatorio para cnpj.biz."""
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+    )
+    context = await browser.new_context(
+        user_agent=random.choice(USER_AGENTS),
+        viewport=random.choice(VIEWPORTS),
+        locale="pt-BR",
+    )
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    """)
 
-    Returns:
-        dict[cnpj] -> dict com dados extraidos
-    """
-    resultados = {}
-    pw = None
-    browser = None
-    total = len(cnpjs)
-
-    if total == 0:
-        return resultados
-
-    log.info(f"[DETALHE] 🌐 Abrindo cnpj.biz com {CNPJBIZ_CONCURRENT_TABS} tabs simultaneas...")
-    log.debug(f"[DETALHE] ⚙️ Retry: {CNPJBIZ_MAX_RETRIES}x | Backoff: {CNPJBIZ_RETRY_BACKOFF}s | "
-          f"Delay: {CNPJBIZ_DELAY_MIN}-{CNPJBIZ_DELAY_MAX}s")
-
+    # Resolver Cloudflare com pagina inicial
+    page_init = await context.new_page()
     try:
-        pw = await async_playwright().start()
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
-        )
-        context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={"width": 1366, "height": 768},
-            locale="pt-BR",
-        )
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """)
-
-        # Resolver Cloudflare com uma pagina inicial
-        page_init = await context.new_page()
         await page_init.goto(CNPJBIZ_URL, wait_until="networkidle", timeout=CNPJBIZ_TIMEOUT)
         await asyncio.sleep(random.uniform(3, 6))
-
-        # Verificar se passou do Cloudflare
         if await _detectar_cloudflare(page_init):
-            log.warning("[DETALHE] ⚠️ Cloudflare nao resolvido, aguardando 15s...")
+            log.warning("[DETALHE] Cloudflare nao resolvido, aguardando 15s...")
             await asyncio.sleep(15)
-            if await _detectar_cloudflare(page_init):
-                log.warning("[DETALHE] 🛑 Cloudflare persistente - tentando mesmo assim...")
+    except Exception as e:
+        log.warning(f"[DETALHE] Erro ao resolver Cloudflare: {e}")
+    finally:
+        try:
+            await page_init.close()
+        except Exception:
+            pass
 
-        await page_init.close()
+    return browser, context
 
-        # Criar tabs para processamento paralelo
-        num_tabs = min(CNPJBIZ_CONCURRENT_TABS, total)
+
+async def _fechar_browser_seguro(browser, pw_instance=None):
+    """Fecha browser e playwright de forma segura."""
+    try:
+        if browser:
+            await browser.close()
+    except Exception:
+        pass
+    try:
+        if pw_instance:
+            await pw_instance.stop()
+    except Exception:
+        pass
+
+
+async def _processar_chunk_cnpjbiz(pw, cnpjs_chunk: list, offset: int,
+                                     total_geral: int, resultados: dict,
+                                     delay_extra: list) -> bool:
+    """Processa um chunk de CNPJs. Retorna True se completou sem crash fatal."""
+    browser = None
+    try:
+        browser, context = await _criar_browser_cnpjbiz(pw)
+        num_tabs = min(CNPJBIZ_CONCURRENT_TABS, len(cnpjs_chunk))
         pages = []
         for _ in range(num_tabs):
             p = await context.new_page()
             pages.append(p)
 
-        # Semaforo para controlar concorrencia
         semaphore = asyncio.Semaphore(num_tabs)
-        # Estado compartilhado (listas para mutabilidade)
         falhas_consecutivas = [0]
-        delay_extra = [1.0]  # Multiplicador de delay
+        sucessos_contador = [0]
+        needs_restart = [False]
 
-        # Processar CNPJs em paralelo usando as tabs
-        tarefas = []
-        for i, cnpj in enumerate(cnpjs):
-            page = pages[i % num_tabs]
-            tarefa = asyncio.create_task(
-                _detalhar_um_cnpj_biz(
-                    page, cnpj, i, total,
-                    semaphore, resultados,
-                    falhas_consecutivas, delay_extra
+        # Processar sequencialmente em sub-batches para detectar restart
+        i = 0
+        while i < len(cnpjs_chunk):
+            if needs_restart[0]:
+                log.warning(f"[DETALHE] Restart sinalizado no CNPJ {i+offset+1}/{total_geral} - reiniciando browser...")
+                break
+
+            # Processar ate CONCURRENT_TABS de cada vez
+            batch_end = min(i + num_tabs, len(cnpjs_chunk))
+            tarefas = []
+            for j in range(i, batch_end):
+                cnpj = cnpjs_chunk[j]
+                page = pages[j % num_tabs]
+                tarefa = asyncio.create_task(
+                    _detalhar_um_cnpj_biz(
+                        page, cnpj, offset + j, total_geral,
+                        semaphore, resultados,
+                        falhas_consecutivas, delay_extra,
+                        sucessos_contador, needs_restart
+                    )
                 )
-            )
-            tarefas.append(tarefa)
+                tarefas.append(tarefa)
 
-        await asyncio.gather(*tarefas, return_exceptions=True)
+            await asyncio.gather(*tarefas, return_exceptions=True)
+            i = batch_end
 
         # Fechar tabs
         for p in pages:
@@ -1059,14 +738,98 @@ async def _detalhar_cnpjbiz_batch(cnpjs: list) -> dict:
             except Exception:
                 pass
 
+        # Retornar posicao onde parou
+        if needs_restart[0]:
+            await _fechar_browser_seguro(browser)
+            return i  # Posicao onde parou
+        return len(cnpjs_chunk)  # Completou tudo
+
     except Exception as e:
-        log.warning(f"[DETALHE] ⚠️ cnpj.biz batch falhou: {e}")
+        log.warning(f"[DETALHE] Chunk falhou: {e}")
+        return 0
+    finally:
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
+
+
+async def _detalhar_cnpjbiz_batch(cnpjs: list) -> dict:
+    """
+    Detalha CNPJs via cnpj.biz com chunking, browser restart e cool-down.
+    Processa em lotes de CHUNK_SIZE CNPJs, reiniciando o browser entre lotes.
+    v3.2: Resiliencia melhorada com deteccao de crash e dados embaralhados.
+
+    Returns:
+        dict[cnpj] -> dict com dados extraidos
+    """
+    resultados = {}
+    total = len(cnpjs)
+
+    if total == 0:
+        return resultados
+
+    num_chunks = (total + CHUNK_SIZE - 1) // CHUNK_SIZE
+    log.info(f"[DETALHE] cnpj.biz: {total} CNPJs em {num_chunks} lotes de {CHUNK_SIZE}")
+    log.info(f"[DETALHE] Config: {CNPJBIZ_CONCURRENT_TABS} tabs | "
+          f"{CNPJBIZ_MAX_RETRIES} retries | backoff {CNPJBIZ_RETRY_BACKOFF}s | "
+          f"delay {CNPJBIZ_DELAY_MIN}-{CNPJBIZ_DELAY_MAX}s")
+
+    pw = None
+    delay_extra = [1.0]
+
+    try:
+        pw = await async_playwright().start()
+        processados = 0
+
+        while processados < total:
+            chunk_num = processados // CHUNK_SIZE + 1
+            chunk_end = min(processados + CHUNK_SIZE, total)
+            cnpjs_chunk = cnpjs[processados:chunk_end]
+
+            log.info(f"[DETALHE] === Lote {chunk_num}/{num_chunks}: "
+                     f"CNPJs {processados+1}-{chunk_end}/{total} ===")
+
+            # Processar chunk (com restart interno se necessario)
+            pos_final = await _processar_chunk_cnpjbiz(
+                pw, cnpjs_chunk, processados, total, resultados, delay_extra
+            )
+
+            if pos_final < len(cnpjs_chunk) and pos_final > 0:
+                # Crash no meio do chunk - avançar ate onde processou
+                processados += pos_final
+                log.warning(f"[DETALHE] Chunk interrompido na posicao {pos_final}. "
+                           f"Pausa longa antes de reiniciar...")
+                pausa = random.uniform(CRASH_PAUSE_MIN, CRASH_PAUSE_MAX)
+                log.info(f"[DETALHE] Aguardando {pausa:.0f}s antes de reiniciar browser...")
+                await asyncio.sleep(pausa)
+            elif pos_final == 0:
+                # Falha total do chunk - pular e tentar proximo
+                processados += len(cnpjs_chunk)
+                log.warning(f"[DETALHE] Chunk falhou completamente - pulando para proximo lote")
+                pausa = random.uniform(CRASH_PAUSE_MIN, CRASH_PAUSE_MAX)
+                await asyncio.sleep(pausa)
+            else:
+                # Chunk completo
+                processados += len(cnpjs_chunk)
+
+            # Cool-down entre chunks (exceto no ultimo)
+            if processados < total:
+                pausa = random.uniform(CHUNK_COOLDOWN_MIN, CHUNK_COOLDOWN_MAX)
+                log.info(f"[DETALHE] Cool-down entre lotes: {pausa:.0f}s "
+                         f"(processados: {len(resultados)}/{total})")
+                await asyncio.sleep(pausa)
+
+    except Exception as e:
+        log.warning(f"[DETALHE] cnpj.biz batch falhou: {e}")
 
     finally:
-        if browser:
-            await browser.close()
         if pw:
-            await pw.stop()
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
     return resultados
 
@@ -1386,148 +1149,6 @@ def _extrair_socios_cnpjbiz(text: str) -> list:
     return socios
 
 
-# ============================================================
-# FALLBACK: OpenCNPJ (quando cnpj.biz falha)
-# ============================================================
-
-async def _detalhar_opencnpj_fallback(cnpj: str) -> dict:
-    """Busca detalhes via OpenCNPJ (fallback quando cnpj.biz falha).
-    Inclui 1 retry com backoff de 3s em caso de falha."""
-    url = f"https://api.opencnpj.org/{cnpj}"
-
-    for tentativa in range(2):  # 2 tentativas (original + 1 retry)
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url, headers={
-                    "User-Agent": random.choice(USER_AGENTS),
-                    "Accept": "application/json",
-                })
-
-                if resp.status_code == 200:
-                    data = resp.json()
-
-                    # Extrair sócios
-                    socios = []
-                    for s in data.get("QSA", []):
-                        qualif = s.get("qualificacao_socio", "")
-                        socios.append({
-                            "nome": s.get("nome_socio", ""),
-                            "qualificacao": qualif,
-                            "tipo": "PJ" if "jurídica" in qualif.lower()
-                                    or (s.get("cnpj_cpf_socio") and
-                                        len(str(s.get("cnpj_cpf_socio", ""))) > 11)
-                                    else "PF",
-                            "cpf_cnpj": s.get("cnpj_cpf_socio", ""),
-                            "data_entrada": s.get("data_entrada_sociedade", ""),
-                        })
-
-                    # Telefones
-                    tel1 = ""
-                    tel2 = ""
-                    tels = data.get("telefones", [])
-                    for i, tel in enumerate(tels):
-                        if not tel.get("is_fax") and tel.get("ddd") and tel.get("numero"):
-                            formatted = f"({tel['ddd']}) {tel['numero']}"
-                            if i == 0:
-                                tel1 = formatted
-                            elif i == 1:
-                                tel2 = formatted
-
-                    # Endereço
-                    logradouro = data.get("logradouro", "") or ""
-                    numero = data.get("numero", "") or ""
-                    complemento = data.get("complemento", "") or ""
-                    bairro = data.get("bairro", "") or ""
-                    cep = data.get("cep", "") or ""
-                    municipio = data.get("municipio", "") or ""
-                    uf_cnpj = data.get("uf", "") or ""
-
-                    partes = [p for p in [logradouro, numero, complemento, bairro, municipio, uf_cnpj] if p]
-                    endereco_completo = ", ".join(partes)
-
-                    # CNAE para tipo de negócio
-                    cnae_raw = data.get("cnae_principal", "")
-                    cnae_str = str(cnae_raw).replace("-", "").replace("/", "").replace(".", "")
-                    if len(cnae_str) > 7:
-                        cnae_str = cnae_str[:7]
-                    tipo_negocio = _cnae_para_tipo_negocio(cnae_str)
-
-                    # Detectar tipo empresa pela natureza jurídica
-                    nj = data.get("natureza_juridica", "") or ""
-                    tipo_emp = ""
-                    nj_lower = nj.lower()
-                    if "individual" in nj_lower and "responsabilidade" not in nj_lower:
-                        tipo_emp = "EI"
-                    elif "limitada" in nj_lower:
-                        tipo_emp = "LTDA"
-                    elif "mei" in nj_lower or "microempreendedor" in nj_lower:
-                        tipo_emp = "MEI"
-
-                    # MEI/EI sem sócios: nome do proprietário da razão social
-                    is_mei = data.get("opcao_mei") or "mei" in nj_lower or "microempreendedor" in nj_lower
-                    is_ei = "individual" in nj_lower
-                    if not socios and (is_mei or is_ei):
-                        razao = data.get("razao_social", "") or ""
-                        nome_prop = re.sub(r'^[\d\.\-/\s]+', '', razao).strip()
-                        nome_prop = re.sub(r'\s+\d{5,}$', '', nome_prop).strip()
-                        if nome_prop and len(nome_prop) >= 5:
-                            socios.append({
-                                "nome": nome_prop.upper(),
-                                "qualificacao": "Empresário/Proprietário",
-                                "tipo": "PF",
-                                "cpf_cnpj": "",
-                                "data_entrada": "",
-                            })
-
-                    email_val = data.get("email", "") or ""
-
-                    return {
-                        "email": email_val,
-                        "email_proprietario": email_val if (is_mei or is_ei) else "",
-                        "telefone1": tel1,
-                        "telefone2": tel2,
-                        "telefone_proprietario": "",
-                        "capital_social": float(str(data.get("capital_social", "0")).replace(",", ".") or 0),
-                        "porte": data.get("porte_empresa", ""),
-                        "natureza_juridica": nj,
-                        "data_abertura": data.get("data_inicio_atividade", ""),
-                        "data_opcao_simples": data.get("data_opcao_simples", ""),
-                        "data_situacao_cadastral": data.get("data_situacao_cadastral", ""),
-                        "simples": data.get("opcao_simples"),
-                        "mei": data.get("opcao_mei"),
-                        "tipo_empresa": tipo_emp,
-                        "tipo_negocio": tipo_negocio,
-                        "socios_json": json.dumps(socios, ensure_ascii=False),
-                        "socios": socios,
-                        "logradouro": logradouro,
-                        "numero": numero,
-                        "complemento": complemento,
-                        "bairro": bairro,
-                        "cep": cep,
-                        "endereco_completo": endereco_completo,
-                        "cnae_principal": cnae_str,
-                        "fonte_detalhamento": "opencnpj",
-                    }
-
-                elif resp.status_code == 429:
-                    log.warning(f"[DETALHE] ⏳ Rate limit OpenCNPJ (HTTP 429), aguardando 5s...")
-                    await asyncio.sleep(5)
-                    continue
-                else:
-                    log.warning(f"[DETALHE] ⚠️ OpenCNPJ {cnpj}: HTTP {resp.status_code}")
-                    if tentativa == 0:
-                        await asyncio.sleep(3)
-                        continue
-                    return {}
-
-        except Exception as e:
-            log.warning(f"[DETALHE] ⚠️ OpenCNPJ falhou para {cnpj} (tentativa {tentativa+1}): {e}")
-            if tentativa == 0:
-                await asyncio.sleep(3)
-                continue
-
-    return {}
-
 
 # ============================================================
 # FUNÇÕES PARA iFood VIA DADOS DA RECEITA
@@ -1549,7 +1170,7 @@ def obter_cnpjs_sem_ifood(cidade: str, uf: str, limite: int = 0) -> list:
             AND cr.ifood_nome IS NULL
             ORDER BY cr.matched DESC
         """
-        params = [cidade.upper(), uf.upper()]
+        params = [normalizar_cidade(cidade), uf.upper()]
         if limite > 0:
             query += " LIMIT ?"
             params.append(limite)
@@ -1581,17 +1202,30 @@ async def detalhar_cnpjs_cidade(cidade: str, uf: str, limite: int = 0) -> dict:
     """
     Busca detalhes para CNPJs que ainda não foram detalhados.
     Fonte primária: cnpj.biz (com revealAllContacts para email/tel do proprietário)
-    Fallback: OpenCNPJ (quando cnpj.biz falha após todas as tentativas)
 
     INCREMENTAL: Só detalha os que ainda não foram detalhados.
     """
     init_tabela_receita()
 
+    # Verificar se há CNPJs importados para esta cidade
+    conn = _get_connection()
+    try:
+        total_cidade = conn.execute(
+            "SELECT COUNT(*) FROM cnpjs_receita WHERE cidade = ? AND uf = ?",
+            (normalizar_cidade(cidade), uf.upper())
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    if total_cidade == 0:
+        log.warning(f"[DETALHE] Nenhum CNPJ importado para {cidade}/{uf}. Execute [A] primeiro!")
+        return {"detalhados": 0, "total_pendente": 0, "cnpjbiz": 0, "opencnpj": 0}
+
     pendentes = obter_cnpjs_nao_detalhados(cidade, uf, limite)
     total = len(pendentes)
 
     if total == 0:
-        log.info(f"[DETALHE] ✅ Todos os CNPJs de {cidade}/{uf} já foram detalhados!")
+        log.info(f"[DETALHE] Todos os {total_cidade} CNPJs de {cidade}/{uf} já foram detalhados!")
         return {"detalhados": 0, "total_pendente": 0, "cnpjbiz": 0, "opencnpj": 0}
 
     log.info(f"[DETALHE] 📋 {total} CNPJs pendentes de detalhamento em {cidade}/{uf}")
