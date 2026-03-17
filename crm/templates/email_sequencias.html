@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Sequências de Email — Derekh CRM{% endblock %}
+{% block page_title %}Sequências de Follow-up{% endblock %}
+
+{% block header_actions %}
+<button onclick="document.getElementById('modal-nova').classList.remove('hidden')" class="btn btn-primary">
+    + Nova Sequência
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+    {% for s in sequencias %}
+    <div class="card">
+        <div class="flex items-center justify-between">
+            <div>
+                <h3 class="text-sm font-semibold text-slate-800">{{ s.nome }}</h3>
+                <p class="text-xs text-slate-500 mt-0.5">
+                    {{ s.descricao or '' }}
+                </p>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="text-right">
+                    <p class="text-sm font-medium text-slate-700">{{ s.total_etapas or 0 }} etapas</p>
+                    <p class="text-xs text-slate-400">{{ s.leads_ativos or 0 }} leads ativos</p>
+                </div>
+                <span class="badge {% if s.ativo %}bg-emerald-100 text-emerald-700{% else %}bg-slate-100 text-slate-500{% endif %}">
+                    {{ 'Ativa' if s.ativo else 'Pausada' }}
+                </span>
+                <a href="/email/sequencias/{{ s.id }}" class="btn btn-secondary text-xs">Ver</a>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+
+    {% if not sequencias %}
+    <div class="text-center py-12">
+        <p class="text-slate-400 mb-4">Nenhuma sequência criada ainda.</p>
+        <button onclick="document.getElementById('modal-nova').classList.remove('hidden')" class="btn btn-primary">
+            Criar Primeira Sequência
+        </button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Modal: Nova Sequência -->
+<div id="modal-nova" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+        <form method="post" action="/api/email/sequencias">
+            <div class="p-6 border-b border-slate-200">
+                <h2 class="text-lg font-semibold text-slate-800">Nova Sequência</h2>
+            </div>
+            <div class="p-6 space-y-4">
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Nome</label>
+                    <input type="text" name="nome" class="input" required placeholder="Ex: Onboarding Restaurantes">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Descrição</label>
+                    <textarea name="descricao" rows="3" class="input" placeholder="Descreva o objetivo desta sequência..."></textarea>
+                </div>
+            </div>
+            <div class="p-6 border-t border-slate-200 flex justify-end gap-3">
+                <button type="button" onclick="this.closest('#modal-nova').classList.add('hidden')" class="btn btn-secondary">Cancelar</button>
+                <button type="submit" class="btn btn-primary">Criar Sequência</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -424,15 +424,16 @@ def finalizar_varredura(cidade: str, uf: str, total: int):
 
 
 def buscar_cnpjs_para_maps_direcionado(cidade: str, uf: str) -> list:
-    """Retorna CNPJs detalhados sem match no Maps, com endereço disponível."""
+    """Retorna CNPJs sem match no Maps, com endereço disponível.
+    v4.0: não exige detalhado=1 — RF de Estabelecimentos já tem endereço."""
     conn = get_connection()
     try:
         rows = conn.execute("""
             SELECT * FROM cnpjs_receita
             WHERE cidade = ? AND uf = ?
-            AND detalhado = 1 AND matched = 0
+            AND matched = 0
             AND logradouro IS NOT NULL AND logradouro != ''
-            ORDER BY data_coleta ASC
+            ORDER BY detalhado DESC, data_coleta ASC
         """, (normalizar_cidade(cidade), uf.upper())).fetchall()
         return [dict(r) for r in rows]
     finally:

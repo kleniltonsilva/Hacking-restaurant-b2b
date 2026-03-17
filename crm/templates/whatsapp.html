@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}WhatsApp — Derekh CRM{% endblock %}
+{% block page_title %}Centro WhatsApp{% endblock %}
+
+{% block content %}
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Templates disponíveis -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Templates de Mensagem</h3>
+        <div class="space-y-4">
+            {% for t in templates_wa %}
+            <div class="border border-slate-200 rounded-lg p-4">
+                <h4 class="text-sm font-medium text-slate-800 mb-2">{{ t.nome }}</h4>
+                <div class="bg-emerald-50 rounded-lg p-3 text-sm text-slate-700 whitespace-pre-line">{{ t.mensagem }}</div>
+                <p class="text-xs text-slate-400 mt-2">
+                    Variáveis: {nome_dono}, {nome_restaurante}, {rating}, {total_avaliacoes}, {cidade}
+                </p>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Envio rápido -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Envio Rápido</h3>
+        <form id="form-whatsapp" class="space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">ID do Lead</label>
+                <input type="number" id="wa-lead-id" class="input" placeholder="Digite o ID do lead" required>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Template</label>
+                <select id="wa-template" class="select">
+                    {% for t in templates_wa %}
+                    <option value="{{ t.key }}">{{ t.nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="flex items-center gap-2 text-xs text-slate-600">
+                    <input type="checkbox" id="wa-tel-prop" class="rounded border-slate-300">
+                    Usar telefone do proprietário
+                </label>
+            </div>
+            <button type="button" onclick="gerarLinkWA()" class="btn btn-success w-full">
+                <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/></svg>
+                Gerar Link WhatsApp
+            </button>
+        </form>
+
+        <!-- Preview -->
+        <div id="wa-preview" class="hidden mt-6 border-t border-slate-200 pt-4">
+            <h4 class="text-sm font-medium text-slate-700 mb-2">Preview</h4>
+            <div id="wa-preview-msg" class="bg-emerald-50 rounded-lg p-3 text-sm text-slate-700 whitespace-pre-line mb-3"></div>
+            <p class="text-xs text-slate-500 mb-3">Telefone: <span id="wa-preview-tel" class="font-mono"></span></p>
+            <a id="wa-link" href="#" target="_blank" class="btn btn-success w-full">Abrir WhatsApp</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function gerarLinkWA() {
+    const leadId = document.getElementById('wa-lead-id').value;
+    const template = document.getElementById('wa-template').value;
+    const usarProp = document.getElementById('wa-tel-prop').checked;
+
+    if (!leadId) return alert('Digite o ID do lead');
+
+    try {
+        const resp = await fetch(`/api/whatsapp/gerar?lead_id=${leadId}&template=${template}&tel_proprietario=${usarProp}`);
+        const data = await resp.json();
+
+        if (data.erro) {
+            alert('Erro: ' + data.erro);
+            return;
+        }
+
+        document.getElementById('wa-preview').classList.remove('hidden');
+        document.getElementById('wa-preview-msg').textContent = data.mensagem_preview;
+        document.getElementById('wa-preview-tel').textContent = data.telefone;
+        document.getElementById('wa-link').href = data.link;
+    } catch(e) {
+        alert('Erro ao gerar link: ' + e.message);
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Email Templates — Derekh CRM{% endblock %}
+{% block page_title %}Email Templates{% endblock %}
+
+{% block header_actions %}
+<button onclick="document.getElementById('modal-novo').classList.remove('hidden')" class="btn btn-primary">
+    + Novo Template
+</button>
+{% endblock %}
+
+{% block content %}
+<!-- Lista de templates -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    {% for t in templates %}
+    <div class="card">
+        <div class="flex items-start justify-between mb-3">
+            <div>
+                <h3 class="text-sm font-semibold text-slate-800">{{ t.nome }}</h3>
+                {% if t.segmento_alvo %}
+                <span class="badge bg-indigo-100 text-indigo-700 mt-1">{{ t.segmento_alvo }}</span>
+                {% endif %}
+            </div>
+            <div class="flex gap-1">
+                <a href="/email/templates/{{ t.id }}/editar" class="text-xs text-indigo-600 hover:underline">Editar</a>
+                <form method="post" action="/api/email/templates/{{ t.id }}/deletar" class="inline"
+                      onsubmit="return confirm('Deletar template?')">
+                    <button type="submit" class="text-xs text-red-500 hover:underline ml-2">Excluir</button>
+                </form>
+            </div>
+        </div>
+        <p class="text-xs text-slate-500 mb-2">Assunto: <span class="text-slate-700">{{ t.assunto }}</span></p>
+        <div class="text-xs text-slate-400 bg-slate-50 rounded p-2 max-h-24 overflow-y-auto">
+            {{ t.corpo_html|truncate(200)|e }}
+        </div>
+        <div class="flex items-center justify-between mt-3">
+            <span class="text-xs text-slate-400">{{ t.created_at|string|truncate(10, True, '') if t.created_at else '' }}</span>
+            <span class="badge {% if t.ativo %}bg-emerald-100 text-emerald-700{% else %}bg-slate-100 text-slate-500{% endif %}">
+                {{ 'Ativo' if t.ativo else 'Inativo' }}
+            </span>
+        </div>
+    </div>
+    {% endfor %}
+
+    {% if not templates %}
+    <div class="col-span-full text-center py-12">
+        <p class="text-slate-400 mb-4">Nenhum template criado ainda.</p>
+        <button onclick="document.getElementById('modal-novo').classList.remove('hidden')" class="btn btn-primary">
+            Criar Primeiro Template
+        </button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Modal: Novo Template -->
+<div id="modal-novo" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <form method="post" action="/api/email/templates">
+            <div class="p-6 border-b border-slate-200">
+                <h2 class="text-lg font-semibold text-slate-800">Novo Template de Email</h2>
+            </div>
+            <div class="p-6 space-y-4">
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Nome do Template</label>
+                    <input type="text" name="nome" class="input" required placeholder="Ex: Primeiro contato - Sem delivery">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Assunto do Email</label>
+                    <input type="text" name="assunto" class="input" required placeholder="Ex: {nome_restaurante}, aumente suas vendas com delivery próprio">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Segmento Alvo</label>
+                    <select name="segmento_alvo" class="select">
+                        <option value="">Todos</option>
+                        <option value="quente">Quente</option>
+                        <option value="premium">Premium</option>
+                        <option value="novo">Novo</option>
+                        <option value="frio">Frio</option>
+                        <option value="rede">Rede</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Corpo HTML</label>
+                    <textarea name="corpo_html" rows="12" class="input font-mono text-xs" required
+                              placeholder="<h2>Olá {nome_dono}!</h2>&#10;<p>Vi que o {nome_restaurante} tem {rating} estrelas...</p>"></textarea>
+                    <p class="text-xs text-slate-400 mt-1">
+                        Variáveis: {nome_dono}, {nome_restaurante}, {razao_social}, {cidade}, {uf}, {rating}, {total_avaliacoes}, {capital_social}, {porte}, {cnpj}
+                    </p>
+                </div>
+            </div>
+            <div class="p-6 border-t border-slate-200 flex justify-end gap-3">
+                <button type="button" onclick="this.closest('#modal-novo').classList.add('hidden')" class="btn btn-secondary">Cancelar</button>
+                <button type="submit" class="btn btn-primary">Criar Template</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

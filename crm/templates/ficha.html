@@ -1,0 +1,313 @@
+{% extends "base.html" %}
+{% block title %}{{ lead.nome_fantasia or lead.razao_social or 'Lead' }} — Derekh CRM{% endblock %}
+{% block page_title %}
+    {{ lead.nome_fantasia or lead.razao_social or 'Lead sem nome' }}
+    <span class="text-sm font-normal text-slate-400 ml-2">{{ lead.cnpj[:2] }}.{{ lead.cnpj[2:5] }}.{{ lead.cnpj[5:8] }}/{{ lead.cnpj[8:12] }}-{{ lead.cnpj[12:] }}</span>
+{% endblock %}
+
+{% block header_actions %}
+{% set cor = SEGMENTO_CORES.get(lead.segmento, 'gray') %}
+<span class="badge bg-{{ cor }}-100 text-{{ cor }}-700">{{ SEGMENTO_LABELS.get(lead.segmento, lead.segmento) }}</span>
+<span class="badge {% if lead.lead_score >= 70 %}bg-orange-100 text-orange-700{% elif lead.lead_score >= 40 %}bg-blue-100 text-blue-700{% else %}bg-slate-100 text-slate-600{% endif %}">
+    Score: {{ lead.lead_score }}
+</span>
+{% endblock %}
+
+{% block content %}
+<!-- Tabs -->
+<div class="border-b border-slate-200 mb-6">
+    <nav class="flex gap-6">
+        {% set tabs = [('dados', 'Dados'), ('pipeline', 'Pipeline'), ('timeline', 'Timeline'), ('acoes', 'Ações')] %}
+        {% for t, label in tabs %}
+        <a href="/lead/{{ lead.id }}?tab={{ t }}"
+           class="pb-3 text-sm font-medium border-b-2 transition-colors
+                  {% if tab == t %}border-indigo-600 text-indigo-600{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
+            {{ label }}
+        </a>
+        {% endfor %}
+    </nav>
+</div>
+
+<!-- TAB: Dados -->
+{% if tab == 'dados' %}
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Dados da Empresa -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Dados da Empresa</h3>
+        <dl class="space-y-3 text-sm">
+            <div class="flex"><dt class="w-40 text-slate-500">Razão Social</dt><dd class="text-slate-800">{{ lead.razao_social or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Nome Fantasia</dt><dd class="text-slate-800 font-medium">{{ lead.nome_fantasia or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">CNPJ</dt><dd class="text-slate-800 font-mono">{{ lead.cnpj }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">CNAE</dt><dd class="text-slate-800">{{ lead.cnae_principal or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Abertura</dt><dd class="text-slate-800">{{ lead.data_abertura or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Capital Social</dt><dd class="text-slate-800">{% if lead.capital_social %}{{ lead.capital_social|format_currency }}{% else %}—{% endif %}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Porte</dt><dd class="text-slate-800">{{ lead.porte or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Natureza Jurídica</dt><dd class="text-slate-800">{{ lead.natureza_juridica or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Simples/MEI</dt><dd class="text-slate-800">{{ 'Simples' if lead.simples == 'S' else '' }} {{ 'MEI' if lead.mei == 'S' else '' }}{{ '—' if lead.simples != 'S' and lead.mei != 'S' else '' }}</dd></div>
+        </dl>
+    </div>
+
+    <!-- Endereço e Contato -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Endereço e Contato</h3>
+        <dl class="space-y-3 text-sm">
+            <div class="flex"><dt class="w-40 text-slate-500">Endereço</dt>
+                <dd class="text-slate-800">
+                    {{ lead.tipo_logradouro or '' }} {{ lead.logradouro or '' }}{% if lead.numero %}, {{ lead.numero }}{% endif %}
+                    {% if lead.complemento %} — {{ lead.complemento }}{% endif %}
+                </dd>
+            </div>
+            <div class="flex"><dt class="w-40 text-slate-500">Bairro</dt><dd class="text-slate-800">{{ lead.bairro or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Cidade/UF</dt><dd class="text-slate-800">{{ lead.cidade or '—' }}/{{ lead.uf or '' }} — CEP {{ lead.cep or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Telefone 1</dt><dd class="text-slate-800">{{ lead.telefone1 or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Telefone 2</dt><dd class="text-slate-800">{{ lead.telefone2 or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Tel. Proprietário</dt><dd class="text-slate-800">{{ lead.telefone_proprietario or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Email</dt><dd class="text-slate-800">{{ lead.email or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Email Proprietário</dt><dd class="text-slate-800">{{ lead.email_proprietario or '—' }}</dd></div>
+        </dl>
+    </div>
+
+    <!-- Google Maps -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Google Maps</h3>
+        {% if lead.rating %}
+        <dl class="space-y-3 text-sm">
+            <div class="flex"><dt class="w-40 text-slate-500">Nome no Maps</dt><dd class="text-slate-800">{{ lead.nome_maps or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Rating</dt><dd class="text-slate-800">
+                <span class="text-amber-500">&#9733;</span> {{ lead.rating }} ({{ lead.total_reviews or 0 }} avaliações)
+            </dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Categoria</dt><dd class="text-slate-800">{{ lead.categoria or '—' }}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Website</dt><dd>{% if lead.website %}<a href="{{ lead.website }}" target="_blank" class="text-indigo-600 hover:underline">{{ lead.website[:50] }}</a>{% else %}—{% endif %}</dd></div>
+            <div class="flex"><dt class="w-40 text-slate-500">Google Maps</dt><dd>{% if lead.google_maps_url %}<a href="{{ lead.google_maps_url }}" target="_blank" class="text-indigo-600 hover:underline">Abrir no Maps</a>{% else %}—{% endif %}</dd></div>
+        </dl>
+        {% else %}
+        <p class="text-sm text-slate-400">Dados do Google Maps não disponíveis.</p>
+        {% endif %}
+    </div>
+
+    <!-- Delivery -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Delivery</h3>
+        <div class="space-y-3">
+            <div class="flex items-center gap-3">
+                <span class="w-20 text-sm text-slate-500">iFood</span>
+                {% if lead.tem_ifood %}
+                <span class="badge bg-red-100 text-red-700">Presente</span>
+                {% if lead.nome_ifood %}<span class="text-xs text-slate-500">{{ lead.nome_ifood }}</span>{% endif %}
+                {% else %}
+                <span class="badge bg-slate-100 text-slate-500">Ausente</span>
+                {% endif %}
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="w-20 text-sm text-slate-500">Rappi</span>
+                {% if lead.tem_rappi %}
+                <span class="badge bg-orange-100 text-orange-700">Presente</span>
+                {% if lead.nome_rappi %}<span class="text-xs text-slate-500">{{ lead.nome_rappi }}</span>{% endif %}
+                {% else %}
+                <span class="badge bg-slate-100 text-slate-500">Ausente</span>
+                {% endif %}
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="w-20 text-sm text-slate-500">99Food</span>
+                {% if lead.tem_99food %}
+                <span class="badge bg-yellow-100 text-yellow-700">Presente</span>
+                {% if lead.nome_99food %}<span class="text-xs text-slate-500">{{ lead.nome_99food }}</span>{% endif %}
+                {% else %}
+                <span class="badge bg-slate-100 text-slate-500">Ausente</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Sócios -->
+    {% if socios %}
+    <div class="card lg:col-span-2">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Sócios (QSA)</h3>
+        <div class="overflow-x-auto">
+            <table class="table w-full">
+                <thead class="bg-slate-50"><tr>
+                    <th>Nome</th><th>Qualificação</th><th>Tipo</th>
+                </tr></thead>
+                <tbody>
+                {% for s in socios %}
+                <tr>
+                    <td class="font-medium">{{ s.nome or '—' }}</td>
+                    <td>{{ s.qualificacao or '—' }}</td>
+                    <td>{{ 'Pessoa Física' if s.tipo == 'PF' else 'Pessoa Jurídica' if s.tipo == 'PJ' else s.tipo or '—' }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- TAB: Pipeline -->
+{% elif tab == 'pipeline' %}
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Status -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Status do Pipeline</h3>
+        <form method="post" action="/api/lead/{{ lead.id }}/status" class="space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Status atual</label>
+                <select name="status" class="select" onchange="document.getElementById('motivo-wrap').style.display = this.value === 'perdido' ? 'block' : 'none'">
+                    {% for s in pipeline_status %}
+                    <option value="{{ s }}" {% if lead.status_pipeline == s %}selected{% endif %}>
+                        {{ pipeline_labels.get(s, s) }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div id="motivo-wrap" {% if lead.status_pipeline != 'perdido' %}style="display:none"{% endif %}>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Motivo da perda</label>
+                <input type="text" name="motivo_perda" class="input" value="{{ lead.motivo_perda or '' }}" placeholder="Ex: Sem interesse, escolheu concorrente...">
+            </div>
+            <button type="submit" class="btn btn-primary">Salvar Status</button>
+        </form>
+    </div>
+
+    <!-- Follow-up -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Agendar Follow-up</h3>
+        <form method="post" action="/api/lead/{{ lead.id }}/followup" class="space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Data do próximo contato</label>
+                <input type="date" name="data" class="input" value="{{ lead.data_proximo_contato or '' }}">
+            </div>
+            {% if lead.data_proximo_contato %}
+            <p class="text-xs text-slate-500">Agendado para: <span class="font-medium text-slate-700">{{ lead.data_proximo_contato }}</span></p>
+            {% endif %}
+            <button type="submit" class="btn btn-primary">Agendar</button>
+        </form>
+    </div>
+
+    <!-- Notas -->
+    <div class="card lg:col-span-2">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Notas</h3>
+        <form method="post" action="/api/lead/{{ lead.id }}/notas" class="space-y-4">
+            <textarea name="notas" rows="4" class="input" placeholder="Anotações sobre este lead...">{{ lead.notas or '' }}</textarea>
+            <button type="submit" class="btn btn-primary">Salvar Notas</button>
+        </form>
+    </div>
+</div>
+
+<!-- TAB: Timeline -->
+{% elif tab == 'timeline' %}
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Nova interação -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Registrar Interação</h3>
+        <form method="post" action="/api/lead/{{ lead.id }}/interacao" class="space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Tipo</label>
+                <select name="tipo" class="select">
+                    {% for t in tipos_interacao %}
+                    <option value="{{ t }}">{{ t|capitalize }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Canal</label>
+                <select name="canal" class="select">
+                    <option value="">—</option>
+                    {% for c in canais %}
+                    <option value="{{ c }}">{{ c|capitalize }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Conteúdo</label>
+                <textarea name="conteudo" rows="3" class="input" placeholder="O que foi discutido..."></textarea>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Resultado</label>
+                <select name="resultado" class="select">
+                    <option value="">—</option>
+                    {% for r in resultados_interacao %}
+                    <option value="{{ r }}">{{ r|capitalize|replace('_', ' ') }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="btn btn-primary w-full">Registrar</button>
+        </form>
+    </div>
+
+    <!-- Timeline -->
+    <div class="lg:col-span-2">
+        <div class="card">
+            <h3 class="text-sm font-semibold text-slate-700 mb-4">Histórico de Interações</h3>
+            {% if interacoes %}
+            <div class="space-y-4">
+                {% for i in interacoes %}
+                <div class="border-l-2 border-indigo-200 pl-4 pb-4">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="badge bg-indigo-100 text-indigo-700">{{ i.tipo|capitalize }}</span>
+                        {% if i.canal %}<span class="badge bg-slate-100 text-slate-600">{{ i.canal|capitalize }}</span>{% endif %}
+                        {% if i.resultado %}
+                        <span class="badge {% if i.resultado == 'positivo' %}bg-emerald-100 text-emerald-700{% elif i.resultado == 'negativo' %}bg-red-100 text-red-700{% elif i.resultado == 'agendou' %}bg-amber-100 text-amber-700{% else %}bg-slate-100 text-slate-600{% endif %}">
+                            {{ i.resultado|capitalize|replace('_', ' ') }}
+                        </span>
+                        {% endif %}
+                        <span class="text-xs text-slate-400 ml-auto">{{ i.created_at|string|truncate(16, True, '') if i.created_at else '' }}</span>
+                    </div>
+                    {% if i.conteudo %}
+                    <p class="text-sm text-slate-600">{{ i.conteudo }}</p>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="text-sm text-slate-400">Nenhuma interação registrada.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- TAB: Ações -->
+{% elif tab == 'acoes' %}
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <!-- WhatsApp -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">WhatsApp</h3>
+        {% if lead.telefone1 or lead.telefone_proprietario %}
+        <div class="space-y-3">
+            {% if lead.telefone1 %}
+            <a href="/whatsapp/enviar/{{ lead.id }}?template=primeiro_contato" target="_blank"
+               class="btn btn-success w-full">
+                <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.625.846 5.059 2.284 7.034L.789 23.444l4.577-1.472A11.94 11.94 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-2.239 0-4.308-.724-5.993-1.953l-.427-.305-2.718.874.853-2.635-.333-.453A9.96 9.96 0 012 12C2 6.477 6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/></svg>
+                Enviar WhatsApp
+            </a>
+            {% endif %}
+            {% if lead.telefone_proprietario %}
+            <a href="/whatsapp/enviar/{{ lead.id }}?template=primeiro_contato&tel=proprietario" target="_blank"
+               class="btn btn-secondary w-full">Tel. Proprietário</a>
+            {% endif %}
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-400">Nenhum telefone disponível.</p>
+        {% endif %}
+    </div>
+
+    <!-- Email -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Email</h3>
+        {% if lead.email %}
+        <p class="text-sm text-slate-600 mb-3">{{ lead.email }}</p>
+        <a href="/email/enviar/{{ lead.id }}" class="btn btn-primary w-full">Enviar Email</a>
+        {% else %}
+        <p class="text-sm text-slate-400">Nenhum email disponível.</p>
+        {% endif %}
+    </div>
+
+    <!-- Sequências -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Sequências</h3>
+        <a href="/email/sequencias?adicionar={{ lead.id }}" class="btn btn-secondary w-full">
+            Adicionar a Sequência
+        </a>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

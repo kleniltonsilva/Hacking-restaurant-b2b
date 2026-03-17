@@ -1,6 +1,6 @@
 """
 receita_federal.py - Importacao de Dados Abertos da Receita Federal
-Baixa e processa arquivos CSV de Estabelecimentos para importar CNPJs de restaurantes.
+v4.0 - Processa Estabelecimentos + Empresas + Simples + Socios
 
 ESTRATEGIA:
 1. Baixa tabela de Municipios (pequena) para mapear codigos -> nomes
@@ -9,6 +9,10 @@ ESTRATEGIA:
 4. Filtra por CNAE + situacao ATIVA + UF + municipio
 5. Insere no banco cnpjs_receita (INSERT OR UPDATE campos vazios)
 6. Deleta ZIP apos processar para economizar disco
+7. Processa Empresas.zip (capital social, porte, natureza juridica)
+8. Processa Simples.zip (Simples Nacional, MEI)
+9. Processa Socios.zip (QSA com nome, qualificacao, tipo)
+10. Marca detalhado=1 para CNPJs com dados uteis da RF (sem precisar cnpj.biz)
 
 MODOS DE BUSCA:
 - Capitais: 27 capitais brasileiras
@@ -36,6 +40,8 @@ from config import (
     DATA_DIR, DB_PATH, CAPITAIS,
     RECEITA_FEDERAL_URL, RECEITA_FEDERAL_INDEX_URL, RECEITA_FEDERAL_DIR,
     CNAES_RESTAURANTE, NUM_ARQUIVOS_ESTABELECIMENTOS, UFS_BRASIL,
+    RF_ARQUIVOS_COMPLEMENTARES, RF_PORTE_MAP, RF_NATUREZA_MAP,
+    RF_QUALIFICACAO_SOCIO_MAP,
 )
 from logger import log
 
@@ -70,6 +76,42 @@ COL_TELEFONE1 = 22
 COL_DDD2 = 23
 COL_TELEFONE2 = 24
 COL_EMAIL = 27
+
+# ============================================================
+# COLUNAS DO CSV DE EMPRESAS (0-indexed)
+# ============================================================
+ECOL_CNPJ_BASICO = 0
+ECOL_RAZAO_SOCIAL = 1
+ECOL_NATUREZA_JURIDICA = 2
+ECOL_QUALIFICACAO_RESPONSAVEL = 3
+ECOL_CAPITAL_SOCIAL = 4
+ECOL_PORTE = 5
+
+# ============================================================
+# COLUNAS DO CSV DE SIMPLES (0-indexed)
+# ============================================================
+SCOL_CNPJ_BASICO = 0
+SCOL_OPCAO_SIMPLES = 1
+SCOL_DATA_OPCAO_SIMPLES = 2
+SCOL_DATA_EXCLUSAO_SIMPLES = 3
+SCOL_OPCAO_MEI = 4
+SCOL_DATA_OPCAO_MEI = 5
+SCOL_DATA_EXCLUSAO_MEI = 6
+
+# ============================================================
+# COLUNAS DO CSV DE SOCIOS (0-indexed)
+# ============================================================
+SOCOL_CNPJ_BASICO = 0
+SOCOL_TIPO = 1         # 1=PJ, 2=PF, 3=Estrangeiro
+SOCOL_NOME = 2
+SOCOL_CPF_CNPJ = 3
+SOCOL_QUALIFICACAO = 4
+SOCOL_DATA_ENTRADA = 5
+SOCOL_PAIS = 6
+SOCOL_REPRESENTANTE = 7
+SOCOL_NOME_REPRESENTANTE = 8
+SOCOL_QUALIFICACAO_REPRESENTANTE = 9
+SOCOL_FAIXA_ETARIA = 10
 
 MUNICIPIOS_CACHE = os.path.join(DATA_DIR, "municipios_rf.json")
 
@@ -414,6 +456,543 @@ def _inserir_batch(conn, batch: list) -> tuple:
 
 
 # ============================================================
+# PROCESSAMENTO DE ARQUIVOS COMPLEMENTARES (v4.0)
+# ============================================================
+
+async def baixar_arquivo_complementar(nome: str, progress=None, task_id=None,
+                                        forcar=False) -> str:
+    """Baixa um arquivo complementar da RF (Empresas, Simples, Socios).
+    Retorna o caminho do arquivo baixado."""
+    base_url = await _resolver_url_base()
+    nome_zip = f"{nome}.zip"
+    url = f"{base_url}{nome_zip}"
+    path = os.path.join(RECEITA_FEDERAL_DIR, nome_zip)
+
+    # Verificar se ja existe
+    if not forcar and os.path.exists(path):
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                resp = await client.head(url)
+                tamanho_remoto = int(resp.headers.get('content-length', 0))
+                tamanho_local = os.path.getsize(path)
+                if tamanho_local >= tamanho_remoto > 0:
+                    log.info(f"[RF] {nome_zip} ja baixado ({tamanho_local / 1024 / 1024:.0f}MB)")
+                    return path
+        except Exception:
+            pass
+
+    log.info(f"[RF] Baixando {nome_zip}...")
+    async with httpx.AsyncClient(timeout=1800, follow_redirects=True) as client:
+        async with client.stream('GET', url) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get('content-length', 0))
+
+            if progress and task_id is not None:
+                progress.update(task_id, total=total)
+
+            with open(path + '.tmp', 'wb') as f:
+                downloaded = 0
+                async for chunk in resp.aiter_bytes(chunk_size=131072):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress and task_id is not None:
+                        progress.update(task_id, completed=downloaded)
+
+    os.replace(path + '.tmp', path)
+    log.info(f"[RF] {nome_zip} baixado ({os.path.getsize(path) / 1024 / 1024:.0f}MB)")
+    return path
+
+
+async def _baixar_arquivos_complementar(nome: str, progress, forcar: bool) -> list:
+    """Baixa arquivo(s) complementar(es) da RF.
+    Tenta {nome}.zip primeiro. Se 404, tenta {nome}0.zip a {nome}9.zip.
+    Retorna lista de caminhos baixados."""
+    try:
+        task_dl = progress.add_task(f"Baixando {nome}.zip", total=0)
+        zip_path = await baixar_arquivo_complementar(nome, progress, task_dl, forcar)
+        progress.remove_task(task_dl)
+        return [zip_path]
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
+        try:
+            progress.remove_task(task_dl)
+        except Exception:
+            pass
+        log.info(f"[RF] {nome}.zip nao encontrado, tentando {nome}0-9.zip...")
+        paths = []
+        for i in range(10):
+            try:
+                task_dl_i = progress.add_task(f"Baixando {nome}{i}.zip", total=0)
+                p = await baixar_arquivo_complementar(f"{nome}{i}", progress, task_dl_i, forcar)
+                progress.remove_task(task_dl_i)
+                paths.append(p)
+            except httpx.HTTPStatusError as e2:
+                try:
+                    progress.remove_task(task_dl_i)
+                except Exception:
+                    pass
+                if e2.response.status_code == 404:
+                    log.info(f"[RF] {nome}{i}.zip nao encontrado, parando em {i}")
+                    break
+                raise
+        if not paths:
+            raise Exception(f"Nenhum arquivo {nome} encontrado no servidor")
+        log.info(f"[RF] {len(paths)} arquivos {nome} baixados")
+        return paths
+
+
+def _carregar_cnpjs_basicos_existentes() -> set:
+    """Retorna set de cnpj_basico (8 primeiros digitos) dos CNPJs ja em cnpjs_receita.
+    Usado para filtrar Empresas/Simples/Socios (que contem TODOS os CNPJs do Brasil)."""
+    conn = _get_connection()
+    try:
+        rows = conn.execute("SELECT SUBSTR(cnpj, 1, 8) as cb FROM cnpjs_receita").fetchall()
+        return {row["cb"] for row in rows}
+    finally:
+        conn.close()
+
+
+def _processar_empresas_zip(zip_path: str, cnpjs_set: set) -> dict:
+    """Processa Empresas.zip: atualiza razao_social, capital_social, porte, natureza_juridica.
+    Filtra apenas CNPJs que ja estao em cnpjs_receita (via cnpj_basico)."""
+    stats = {"lidos": 0, "atualizados": 0}
+    conn = _get_connection()
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for csv_name in zf.namelist():
+                log.info(f"[RF] Processando Empresas -> {csv_name}...")
+                with zf.open(csv_name) as f:
+                    reader = csv.reader(
+                        io.TextIOWrapper(f, encoding='latin-1', errors='replace'),
+                        delimiter=';', quotechar='"'
+                    )
+
+                    batch = []
+                    for row in reader:
+                        stats["lidos"] += 1
+
+                        if len(row) < 6:
+                            continue
+
+                        cnpj_basico = row[ECOL_CNPJ_BASICO].strip('"').strip()
+                        if cnpj_basico not in cnpjs_set:
+                            continue
+
+                        razao_social = row[ECOL_RAZAO_SOCIAL].strip('"').strip()
+                        natureza_cod = row[ECOL_NATUREZA_JURIDICA].strip('"').strip()
+                        natureza = RF_NATUREZA_MAP.get(natureza_cod, natureza_cod)
+
+                        capital_str = row[ECOL_CAPITAL_SOCIAL].strip('"').strip()
+                        capital_str = capital_str.replace(',', '.')
+                        try:
+                            capital = float(capital_str) if capital_str else 0
+                        except ValueError:
+                            capital = 0
+
+                        porte_cod = row[ECOL_PORTE].strip('"').strip()
+                        porte = RF_PORTE_MAP.get(porte_cod, porte_cod)
+
+                        # Tipo empresa baseado na natureza
+                        tipo = ""
+                        nj_lower = natureza.lower()
+                        if "individual" in nj_lower and "responsabilidade" not in nj_lower:
+                            tipo = "EI"
+                        elif "eireli" in nj_lower:
+                            tipo = "EIRELI"
+                        elif "limitada" in nj_lower:
+                            tipo = "LTDA"
+                        elif "anônima" in nj_lower or "anonima" in nj_lower:
+                            tipo = "SA"
+                        elif "microempreendedor" in nj_lower:
+                            tipo = "MEI"
+                        elif "unipessoal" in nj_lower:
+                            tipo = "SLU"
+
+                        batch.append((
+                            razao_social, natureza, capital, porte, tipo, cnpj_basico
+                        ))
+
+                        if len(batch) >= 5000:
+                            updated = _atualizar_empresas_batch(conn, batch)
+                            stats["atualizados"] += updated
+                            batch = []
+
+                            if stats["lidos"] % 500000 == 0:
+                                log.info(f"[RF] ... Empresas: {stats['lidos']:,} lidos, "
+                                         f"{stats['atualizados']:,} atualizados")
+
+                    if batch:
+                        updated = _atualizar_empresas_batch(conn, batch)
+                        stats["atualizados"] += updated
+
+    finally:
+        conn.close()
+
+    return stats
+
+
+def _atualizar_empresas_batch(conn, batch: list) -> int:
+    """Atualiza batch de dados de Empresas no banco."""
+    total_antes = conn.total_changes
+    for razao, natureza, capital, porte, tipo, cnpj_basico in batch:
+        conn.execute("""
+            UPDATE cnpjs_receita
+            SET razao_social = COALESCE(NULLIF(?, ''), razao_social),
+                natureza_juridica = COALESCE(NULLIF(?, ''), natureza_juridica),
+                capital_social = CASE WHEN ? > 0 THEN ? ELSE capital_social END,
+                porte = COALESCE(NULLIF(?, ''), porte),
+                tipo_empresa = COALESCE(NULLIF(?, ''), tipo_empresa)
+            WHERE SUBSTR(cnpj, 1, 8) = ?
+        """, (razao, natureza, capital, capital, porte, tipo, cnpj_basico))
+    conn.commit()
+    return conn.total_changes - total_antes
+
+
+def _processar_simples_zip(zip_path: str, cnpjs_set: set) -> dict:
+    """Processa Simples.zip: atualiza simples, mei, data_opcao_simples."""
+    stats = {"lidos": 0, "atualizados": 0}
+    conn = _get_connection()
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for csv_name in zf.namelist():
+                log.info(f"[RF] Processando Simples -> {csv_name}...")
+                with zf.open(csv_name) as f:
+                    reader = csv.reader(
+                        io.TextIOWrapper(f, encoding='latin-1', errors='replace'),
+                        delimiter=';', quotechar='"'
+                    )
+
+                    batch = []
+                    for row in reader:
+                        stats["lidos"] += 1
+
+                        if len(row) < 7:
+                            continue
+
+                        cnpj_basico = row[SCOL_CNPJ_BASICO].strip('"').strip()
+                        if cnpj_basico not in cnpjs_set:
+                            continue
+
+                        opcao_simples = row[SCOL_OPCAO_SIMPLES].strip('"').strip().upper()
+                        data_simples = row[SCOL_DATA_OPCAO_SIMPLES].strip('"').strip()
+                        opcao_mei = row[SCOL_OPCAO_MEI].strip('"').strip().upper()
+
+                        simples = 1 if opcao_simples == "S" else 0
+                        mei = 1 if opcao_mei == "S" else 0
+
+                        batch.append((simples, mei, data_simples, cnpj_basico))
+
+                        if len(batch) >= 5000:
+                            updated = _atualizar_simples_batch(conn, batch)
+                            stats["atualizados"] += updated
+                            batch = []
+
+                            if stats["lidos"] % 500000 == 0:
+                                log.info(f"[RF] ... Simples: {stats['lidos']:,} lidos, "
+                                         f"{stats['atualizados']:,} atualizados")
+
+                    if batch:
+                        updated = _atualizar_simples_batch(conn, batch)
+                        stats["atualizados"] += updated
+
+    finally:
+        conn.close()
+
+    return stats
+
+
+def _atualizar_simples_batch(conn, batch: list) -> int:
+    """Atualiza batch de dados do Simples no banco."""
+    total_antes = conn.total_changes
+    for simples, mei, data_simples, cnpj_basico in batch:
+        conn.execute("""
+            UPDATE cnpjs_receita
+            SET simples = ?, mei = ?,
+                data_opcao_simples = COALESCE(NULLIF(?, ''), data_opcao_simples),
+                tipo_empresa = CASE WHEN ? = 1 THEN 'MEI' ELSE tipo_empresa END
+            WHERE SUBSTR(cnpj, 1, 8) = ?
+        """, (simples, mei, data_simples, mei, cnpj_basico))
+    conn.commit()
+    return conn.total_changes - total_antes
+
+
+def _processar_socios_zip(zip_paths, cnpjs_set: set) -> dict:
+    """Processa Socios ZIP(s): agrupa socios por CNPJ basico e salva como JSON.
+    zip_paths pode ser um caminho unico (str) ou lista de caminhos."""
+    if isinstance(zip_paths, str):
+        zip_paths = [zip_paths]
+
+    stats = {"lidos": 0, "cnpjs_com_socios": 0}
+
+    # Agrupar socios por cnpj_basico em memoria (acumula de todos os arquivos)
+    socios_por_cnpj = {}
+
+    for zip_path in zip_paths:
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                for csv_name in zf.namelist():
+                    log.info(f"[RF] Processando Socios -> {csv_name}...")
+                    with zf.open(csv_name) as f:
+                        reader = csv.reader(
+                            io.TextIOWrapper(f, encoding='latin-1', errors='replace'),
+                            delimiter=';', quotechar='"'
+                        )
+
+                        for row in reader:
+                            stats["lidos"] += 1
+
+                            if len(row) < 7:
+                                continue
+
+                            cnpj_basico = row[SOCOL_CNPJ_BASICO].strip('"').strip()
+                            if cnpj_basico not in cnpjs_set:
+                                continue
+
+                            tipo_cod = row[SOCOL_TIPO].strip('"').strip()
+                            tipo = "PF" if tipo_cod == "2" else ("PJ" if tipo_cod == "1" else "Estrangeiro")
+
+                            nome = row[SOCOL_NOME].strip('"').strip()
+                            if not nome:
+                                continue
+
+                            cpf_cnpj = row[SOCOL_CPF_CNPJ].strip('"').strip() if len(row) > SOCOL_CPF_CNPJ else ""
+                            qualif_cod = row[SOCOL_QUALIFICACAO].strip('"').strip() if len(row) > SOCOL_QUALIFICACAO else ""
+                            qualificacao = RF_QUALIFICACAO_SOCIO_MAP.get(qualif_cod, qualif_cod)
+
+                            data_entrada = row[SOCOL_DATA_ENTRADA].strip('"').strip() if len(row) > SOCOL_DATA_ENTRADA else ""
+                            faixa_etaria = row[SOCOL_FAIXA_ETARIA].strip('"').strip() if len(row) > SOCOL_FAIXA_ETARIA else ""
+
+                            socio = {
+                                "nome": nome.upper(),
+                                "qualificacao": qualificacao,
+                                "tipo": tipo,
+                                "cpf_cnpj": cpf_cnpj,
+                                "data_entrada": data_entrada,
+                                "faixa_etaria": faixa_etaria,
+                            }
+
+                            if cnpj_basico not in socios_por_cnpj:
+                                socios_por_cnpj[cnpj_basico] = []
+                            socios_por_cnpj[cnpj_basico].append(socio)
+
+                            if stats["lidos"] % 1000000 == 0:
+                                log.info(f"[RF] ... Socios: {stats['lidos']:,} lidos, "
+                                         f"{len(socios_por_cnpj):,} CNPJs com socios")
+
+        except Exception as e:
+            log.error(f"[RF] Erro ao ler {os.path.basename(zip_path)}: {e}")
+
+    # Salvar socios agrupados no banco
+    if socios_por_cnpj:
+        log.info(f"[RF] Salvando socios de {len(socios_por_cnpj):,} CNPJs no banco...")
+        conn = _get_connection()
+        try:
+            batch_count = 0
+            for cnpj_basico, socios_lista in socios_por_cnpj.items():
+                socios_json = json.dumps(socios_lista, ensure_ascii=False)
+                conn.execute("""
+                    UPDATE cnpjs_receita
+                    SET socios_json = ?
+                    WHERE SUBSTR(cnpj, 1, 8) = ? AND (socios_json IS NULL OR socios_json = '[]')
+                """, (socios_json, cnpj_basico))
+                batch_count += 1
+                if batch_count % 5000 == 0:
+                    conn.commit()
+            conn.commit()
+            stats["cnpjs_com_socios"] = len(socios_por_cnpj)
+        finally:
+            conn.close()
+
+    return stats
+
+
+def _marcar_enriquecido_rf():
+    """Marca detalhado=1 e enriquecido_rf=1 para CNPJs que ja tem dados uteis da RF.
+    Criterio: tem endereco (logradouro) + pelo menos um de: socios, capital, ou porte."""
+    conn = _get_connection()
+    try:
+        cursor = conn.execute("""
+            UPDATE cnpjs_receita
+            SET detalhado = 1,
+                enriquecido_rf = 1,
+                fonte_detalhamento = COALESCE(NULLIF(fonte_detalhamento, ''), 'dados_abertos_rf')
+            WHERE detalhado = 0
+            AND logradouro IS NOT NULL AND logradouro != ''
+            AND (
+                (socios_json IS NOT NULL AND socios_json != '[]')
+                OR (capital_social IS NOT NULL AND capital_social > 0)
+                OR (porte IS NOT NULL AND porte != '' AND porte != '00')
+            )
+        """)
+        conn.commit()
+        marcados = cursor.rowcount
+        if marcados > 0:
+            log.info(f"[RF] {marcados:,} CNPJs marcados como detalhado=1 (enriquecidos pela RF)")
+        return marcados
+    finally:
+        conn.close()
+
+
+async def _processar_complementares(manter_arquivos: bool = False,
+                                      forcar_download: bool = False,
+                                      pasta_rf: str = None) -> dict:
+    """Processa os 3 arquivos complementares: Empresas, Simples, Socios.
+    Filtra por cnpj_basico dos CNPJs ja em cnpjs_receita.
+    Rastreia cada etapa via controle_atualizacao para permitir retomada."""
+    stats_total = {"empresas": {}, "simples": {}, "socios": {}, "marcados_detalhado": 0}
+
+    # Garantir indice de expressao para acelerar UPDATEs (O(log N) em vez de O(N))
+    conn = _get_connection()
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_receita_cnpj_basico ON cnpjs_receita(SUBSTR(cnpj, 1, 8))")
+    conn.commit()
+    conn.close()
+    log.info("[RF] Indice idx_receita_cnpj_basico garantido")
+
+    log.info("[RF] Carregando cnpj_basico dos CNPJs existentes...")
+    cnpjs_set = _carregar_cnpjs_basicos_existentes()
+    if not cnpjs_set:
+        log.warning("[RF] Nenhum CNPJ em cnpjs_receita - importe Estabelecimentos primeiro!")
+        return stats_total
+    log.info(f"[RF] {len(cnpjs_set):,} cnpj_basico unicos para filtrar")
+
+    # Identificador da versao RF para rastreamento por etapa
+    pasta_id = pasta_rf or _pasta_recente_cache or "desconhecida"
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+
+        # 4a. Empresas (pode ser Empresas.zip ou Empresas0-9.zip)
+        if not forcar_download and _obter_controle("rf_empresas_ok") == pasta_id:
+            log.info("[RF] === Empresas ja processado para esta versao RF, pulando... ===")
+        else:
+            log.info("[RF] === Empresas (capital social, porte, natureza) ===")
+            try:
+                paths = await _baixar_arquivos_complementar("Empresas", progress, forcar_download)
+                emp_stats = {"lidos": 0, "atualizados": 0}
+                for p in paths:
+                    s = _processar_empresas_zip(p, cnpjs_set)
+                    emp_stats["lidos"] += s["lidos"]
+                    emp_stats["atualizados"] += s["atualizados"]
+                    if not manter_arquivos:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                stats_total["empresas"] = emp_stats
+                log.info(f"[RF] Empresas: {emp_stats['atualizados']:,} CNPJs atualizados")
+                _salvar_controle("rf_empresas_ok", pasta_id)
+            except Exception as e:
+                log.error(f"[RF] Erro ao processar Empresas: {e}")
+
+        # Marcar detalhado apos Empresas (capital/porte ja qualificam)
+        marcados = _marcar_enriquecido_rf()
+        stats_total["marcados_detalhado"] += marcados
+
+        # 4b. Simples (arquivo unico)
+        if not forcar_download and _obter_controle("rf_simples_ok") == pasta_id:
+            log.info("[RF] === Simples ja processado para esta versao RF, pulando... ===")
+        else:
+            log.info("[RF] === Simples (Simples Nacional, MEI) ===")
+            try:
+                paths = await _baixar_arquivos_complementar("Simples", progress, forcar_download)
+                simp_stats = {"lidos": 0, "atualizados": 0}
+                for p in paths:
+                    s = _processar_simples_zip(p, cnpjs_set)
+                    simp_stats["lidos"] += s["lidos"]
+                    simp_stats["atualizados"] += s["atualizados"]
+                    if not manter_arquivos:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                stats_total["simples"] = simp_stats
+                log.info(f"[RF] Simples: {simp_stats['atualizados']:,} CNPJs atualizados")
+                _salvar_controle("rf_simples_ok", pasta_id)
+            except Exception as e:
+                log.error(f"[RF] Erro ao processar Simples: {e}")
+
+        # Marcar detalhado apos Simples
+        marcados = _marcar_enriquecido_rf()
+        stats_total["marcados_detalhado"] += marcados
+
+        # 4c. Socios (pode ser Socios.zip ou Socios0-9.zip)
+        # Baixa todos primeiro, depois processa junto (socios do mesmo CNPJ podem estar em arquivos diferentes)
+        if not forcar_download and _obter_controle("rf_socios_ok") == pasta_id:
+            log.info("[RF] === Socios ja processado para esta versao RF, pulando... ===")
+        else:
+            log.info("[RF] === Socios (QSA) ===")
+            try:
+                paths = await _baixar_arquivos_complementar("Socios", progress, forcar_download)
+                stats_total["socios"] = _processar_socios_zip(paths, cnpjs_set)
+                log.info(f"[RF] Socios: {stats_total['socios']['cnpjs_com_socios']:,} CNPJs com socios")
+                if not manter_arquivos:
+                    for p in paths:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                _salvar_controle("rf_socios_ok", pasta_id)
+            except Exception as e:
+                log.error(f"[RF] Erro ao processar Socios: {e}")
+
+        # Marcar detalhado apos Socios (socios_json qualifica)
+        marcados = _marcar_enriquecido_rf()
+        stats_total["marcados_detalhado"] += marcados
+
+    return stats_total
+
+
+async def processar_complementares_standalone(manter_arquivos: bool = False,
+                                                forcar_download: bool = False) -> dict:
+    """Wrapper publico para processar arquivos complementares da RF
+    (Empresas + Simples + Socios) sem re-importar Estabelecimentos.
+    Requer que cnpjs_receita ja tenha dados de Estabelecimentos."""
+    conn = sqlite3.connect(DB_PATH)
+    total = conn.execute("SELECT COUNT(*) FROM cnpjs_receita").fetchone()[0]
+    enriquecidos = conn.execute(
+        "SELECT COUNT(*) FROM cnpjs_receita WHERE enriquecido_rf = 1"
+    ).fetchone()[0]
+    conn.close()
+
+    log.info(f"[RF] Base atual: {total:,} CNPJs | {enriquecidos:,} ja enriquecidos")
+
+    if total == 0:
+        log.warning("[RF] Nenhum CNPJ em cnpjs_receita - importe Estabelecimentos primeiro (opcao A)!")
+        return {}
+
+    # Resolver pasta RF para rastreamento por etapa
+    await _resolver_url_base()
+    pasta_rf = _pasta_recente_cache
+
+    stats = await _processar_complementares(manter_arquivos, forcar_download, pasta_rf=pasta_rf)
+
+    # Estatisticas finais
+    conn = sqlite3.connect(DB_PATH)
+    novo_enriquecidos = conn.execute(
+        "SELECT COUNT(*) FROM cnpjs_receita WHERE enriquecido_rf = 1"
+    ).fetchone()[0]
+    com_socios = conn.execute(
+        "SELECT COUNT(*) FROM cnpjs_receita WHERE socios_json IS NOT NULL AND socios_json != '[]'"
+    ).fetchone()[0]
+    conn.close()
+
+    log.info(f"[RF] Enriquecimento concluido!")
+    log.info(f"[RF]   Detalhado=1: {novo_enriquecidos:,} CNPJs")
+    log.info(f"[RF]   Com socios: {com_socios:,} CNPJs")
+
+    return stats
+
+
+# ============================================================
 # SELECAO INTERATIVA DE CIDADES
 # ============================================================
 
@@ -606,14 +1185,32 @@ async def importar_receita_federal(modo: str, cidades_alvo: list = None,
                 except OSError:
                     pass
 
-    # 4. Salvar controle de atualizacao
+    # 4. Processar arquivos complementares (Empresas, Simples, Socios)
+    if total_stats["inseridos"] > 0 or total_stats["filtrados"] > 0:
+        log.info(f"[RF] {'='*50}")
+        log.info(f"[RF] PROCESSANDO ARQUIVOS COMPLEMENTARES (Empresas + Simples + Socios)")
+        log.info(f"[RF] {'='*50}")
+        try:
+            stats_compl = await _processar_complementares(
+                manter_arquivos=manter_arquivos,
+                forcar_download=forcar_download,
+                pasta_rf=pasta_remota,
+            )
+            total_stats["empresas_atualizados"] = stats_compl.get("empresas", {}).get("atualizados", 0)
+            total_stats["simples_atualizados"] = stats_compl.get("simples", {}).get("atualizados", 0)
+            total_stats["socios_cnpjs"] = stats_compl.get("socios", {}).get("cnpjs_com_socios", 0)
+            total_stats["marcados_detalhado"] = stats_compl.get("marcados_detalhado", 0)
+        except Exception as e:
+            log.error(f"[RF] Erro nos complementares: {e}")
+
+    # 5. Salvar controle de atualizacao
     if _pasta_recente_cache and total_stats["inseridos"] > 0:
         _salvar_controle("rf_ultima_pasta", _pasta_recente_cache)
         _salvar_controle("rf_ultima_importacao", datetime.now().isoformat())
         _salvar_controle("rf_modo", modo)
         log.info(f"[RF] Controle salvo: pasta={_pasta_recente_cache}, modo={modo}")
 
-    # 5. Resumo final
+    # 6. Resumo final
     modo_label = {
         "capitais": f"CAPITAIS ({len(CAPITAIS)} cidades)",
         "estado": f"ESTADO {uf_alvo or '?'}",
@@ -630,6 +1227,14 @@ async def importar_receita_federal(modo: str, cidades_alvo: list = None,
     log.info(f"  Registros alvo:   {total_stats['filtrados']:>12,}")
     log.info(f"  CNPJs novos:      {total_stats['inseridos']:>12,}")
     log.info(f"  Ja existentes:    {total_stats['ignorados']:>12,}")
+    if total_stats.get("empresas_atualizados"):
+        log.info(f"  Empresas upd:     {total_stats['empresas_atualizados']:>12,}")
+    if total_stats.get("simples_atualizados"):
+        log.info(f"  Simples upd:      {total_stats['simples_atualizados']:>12,}")
+    if total_stats.get("socios_cnpjs"):
+        log.info(f"  CNPJs c/ socios:  {total_stats['socios_cnpjs']:>12,}")
+    if total_stats.get("marcados_detalhado"):
+        log.info(f"  Detalhado=1 (RF): {total_stats['marcados_detalhado']:>12,}")
 
     # Estatisticas por cidade
     conn = _get_connection()

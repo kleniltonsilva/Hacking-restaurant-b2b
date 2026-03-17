@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Pipeline — Derekh CRM{% endblock %}
+{% block page_title %}Pipeline{% endblock %}
+
+{% block head %}
+<style>
+    .kanban-board { display: flex; gap: 0.75rem; overflow-x: auto; min-height: calc(100vh - 200px); }
+    .kanban-col { min-width: 220px; max-width: 260px; flex-shrink: 0; }
+    .kanban-card { cursor: grab; transition: transform 0.15s, box-shadow 0.15s; }
+    .kanban-card:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    .kanban-card.dragging { opacity: 0.5; transform: rotate(2deg); }
+    .kanban-col.drag-over .kanban-drop { background: #eef2ff; border-color: #6366f1; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="kanban-board pb-8">
+    {% for col in colunas %}
+    {% set cores = {'novo':'slate','contactado':'blue','respondeu':'cyan','demo_agendada':'violet','proposta_enviada':'amber','negociando':'orange','cliente':'emerald','perdido':'red'} %}
+    {% set cor = cores.get(col.status, 'slate') %}
+    <div class="kanban-col" data-status="{{ col.status }}">
+        <!-- Header -->
+        <div class="bg-{{ cor }}-50 border border-{{ cor }}-200 rounded-t-lg px-3 py-2 flex items-center justify-between">
+            <h3 class="text-sm font-semibold text-{{ cor }}-700">{{ col.label }}</h3>
+            <span class="badge bg-{{ cor }}-100 text-{{ cor }}-700">{{ col.total }}</span>
+        </div>
+
+        <!-- Cards container -->
+        <div class="kanban-drop bg-slate-50 border border-t-0 border-slate-200 rounded-b-lg p-2 space-y-2 min-h-[200px]"
+             data-status="{{ col.status }}"
+             ondragover="event.preventDefault(); this.closest('.kanban-col').classList.add('drag-over')"
+             ondragleave="this.closest('.kanban-col').classList.remove('drag-over')"
+             ondrop="handleDrop(event, '{{ col.status }}')">
+
+            {% for lead in col.leads %}
+            <div class="kanban-card bg-white rounded-lg border border-slate-200 p-3"
+                 draggable="true"
+                 data-lead-id="{{ lead.id }}"
+                 ondragstart="handleDragStart(event, {{ lead.id }})"
+                 ondragend="this.classList.remove('dragging')">
+
+                <a href="/lead/{{ lead.id }}" class="block">
+                    <p class="text-sm font-medium text-slate-800 truncate">
+                        {{ lead.nome_fantasia or lead.razao_social or '—' }}
+                    </p>
+                    <p class="text-xs text-slate-400 mt-0.5">
+                        {{ lead.cidade or '—' }}/{{ lead.uf or '' }}
+                    </p>
+                </a>
+
+                <div class="flex items-center justify-between mt-2">
+                    <span class="badge {% if lead.lead_score >= 70 %}bg-orange-100 text-orange-700{% elif lead.lead_score >= 40 %}bg-blue-100 text-blue-700{% else %}bg-slate-100 text-slate-600{% endif %}">
+                        {{ lead.lead_score }}
+                    </span>
+                    {% if lead.data_proximo_contato %}
+                    <span class="text-xs text-slate-400" title="Próximo contato">
+                        {{ lead.data_proximo_contato }}
+                    </span>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+
+            {% if col.total > col.leads|length %}
+            <p class="text-xs text-center text-slate-400 py-1">
+                +{{ col.total - col.leads|length }} mais
+            </p>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let draggedLeadId = null;
+
+function handleDragStart(e, leadId) {
+    draggedLeadId = leadId;
+    e.target.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+}
+
+async function handleDrop(e, newStatus) {
+    e.preventDefault();
+    const col = e.target.closest('.kanban-col');
+    if (col) col.classList.remove('drag-over');
+
+    if (!draggedLeadId) return;
+
+    try {
+        const form = new FormData();
+        form.append('status', newStatus);
+        const resp = await fetch('/api/lead/' + draggedLeadId + '/status', {
+            method: 'POST',
+            body: form,
+            redirect: 'manual'
+        });
+        // Reload page to reflect changes
+        window.location.reload();
+    } catch(err) {
+        console.error('Erro ao mover lead:', err);
+    }
+    draggedLeadId = null;
+}
+</script>
+{% endblock %}

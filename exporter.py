@@ -1,12 +1,16 @@
 """
 exporter.py - Exportação de dados para Excel
-Gera planilhas profissionais com TODOS os leads coletados.
+v4.0 - Multi-delivery (iFood + Rappi + 99Food)
 
 ABAS:
-  1. Leads Receita: TODOS os CNPJs detalhados (com email, telefone, sócios) - O PRINCIPAL
-  2. Restaurantes Maps: dados do Google Maps (com CNPJ vinculado quando possível)
-  3. Leads Premium: tem telefone + sem iFood (oportunidade!)
-  4. Resumo por Cidade: estatísticas
+  1. Leads Receita: TODOS os CNPJs (com email, telefone, sócios) - O PRINCIPAL
+  2. Leads Detalhados: só com dados completos
+  3. Leads Premium (iFood): com contato + no iFood
+  4. Com Contato: todos que tem email/telefone
+  5. Com Sócios: leads com QSA
+  6. Sem Delivery: NÃO está em nenhuma plataforma (oportunidade máxima!)
+  7. Restaurantes Maps: dados do Google Maps
+  8. Resumo por Cidade: estatísticas
 """
 import json
 import os
@@ -67,12 +71,13 @@ def _estilizar_planilha(wb, ws):
             cell.alignment = Alignment(vertical="center", wrap_text=True)
 
         for col in range(1, ws.max_column + 1):
-            if ws.cell(row=1, column=col).value == "Tem iFood":
-                ifood_cell = ws.cell(row=row, column=col)
-                if ifood_cell.value == "SIM":
-                    ifood_cell.fill = ifood_sim
-                elif ifood_cell.value == "NÃO":
-                    ifood_cell.fill = ifood_nao
+            header = ws.cell(row=1, column=col).value
+            if header in ("Tem iFood", "Tem Rappi", "Tem 99Food"):
+                cell = ws.cell(row=row, column=col)
+                if cell.value == "SIM":
+                    cell.fill = ifood_sim
+                elif cell.value == "NÃO":
+                    cell.fill = ifood_nao
 
     for col in range(1, ws.max_column + 1):
         max_length = 0
@@ -139,6 +144,12 @@ def _preparar_leads_receita(dados: list) -> list:
         if bairro and bairro == bairro.upper() and len(bairro) > 3:
             bairro = bairro.title()
 
+        # Contar plataformas de delivery
+        tem_ifood = 1 if d.get("tem_ifood") else 0
+        tem_rappi = 1 if d.get("tem_rappi") else 0
+        tem_99food = 1 if d.get("tem_99food") else 0
+        num_plataformas = tem_ifood + tem_rappi + tem_99food
+
         registros.append({
             "CNPJ": d.get("cnpj", ""),
             "Razão Social": razao_final,
@@ -148,7 +159,7 @@ def _preparar_leads_receita(dados: list) -> list:
             "UF": d.get("uf", ""),
             "Email": d.get("email", ""),
             "Email Proprietário": d.get("email_proprietario", ""),
-            "Telefones": telefones_str,
+            "Tel. Receita Federal": telefones_str,
             "Tel. Proprietário": d.get("telefone_proprietario", ""),
             "Sócios": socios_str,
             "Endereço": endereco,
@@ -164,8 +175,13 @@ def _preparar_leads_receita(dados: list) -> list:
             "Simples Nacional": "SIM" if d.get("simples") else "NÃO",
             "MEI": "SIM" if d.get("mei") else "NÃO",
             "CNAE Principal": d.get("cnae_principal", ""),
-            "Tem iFood": "SIM" if d.get("tem_ifood") else "NÃO",
+            "Tem iFood": "SIM" if tem_ifood else "NÃO",
             "iFood Nome": d.get("ifood_nome", ""),
+            "Tem Rappi": "SIM" if tem_rappi else "NÃO",
+            "Rappi Nome": d.get("rappi_nome", ""),
+            "Tem 99Food": "SIM" if tem_99food else "NÃO",
+            "99Food Nome": d.get("food99_nome", ""),
+            "Num Plataformas": num_plataformas,
             "Match Maps": "SIM" if d.get("matched") else "NÃO",
             "Nome Maps": d.get("nome_maps", ""),
             "Score Match": f"{d.get('score_match', 0):.0%}" if d.get("score_match") else "",
@@ -222,7 +238,7 @@ def exportar_excel(cidade: str = None, uf: str = None) -> str:
             df_premium = df_detalhados[
                 (
                     (df_detalhados["Email"].fillna("") != "") |
-                    (df_detalhados["Telefones"].fillna("") != "") |
+                    (df_detalhados["Tel. Receita Federal"].fillna("") != "") |
                     (df_detalhados["Tel. Proprietário"].fillna("") != "")
                 ) &
                 (df_detalhados["Tem iFood"] == "SIM")
@@ -233,7 +249,7 @@ def exportar_excel(cidade: str = None, uf: str = None) -> str:
             # === ABA: Todos com contato (independente de iFood) ===
             df_com_contato = df_detalhados[
                 (df_detalhados["Email"].fillna("") != "") |
-                (df_detalhados["Telefones"].fillna("") != "") |
+                (df_detalhados["Tel. Receita Federal"].fillna("") != "") |
                 (df_detalhados["Tel. Proprietário"].fillna("") != "") |
                 (df_detalhados["Email Proprietário"].fillna("") != "")
             ]
@@ -245,6 +261,15 @@ def exportar_excel(cidade: str = None, uf: str = None) -> str:
             if not df_com_socios.empty:
                 df_com_socios.to_excel(writer, sheet_name="Com Sócios", index=False)
 
+            # === ABA: Sem Delivery (nao esta em NENHUMA plataforma) ===
+            df_sem_delivery = df_detalhados[
+                (df_detalhados["Tem iFood"] == "NÃO") &
+                (df_detalhados["Tem Rappi"] == "NÃO") &
+                (df_detalhados["Tem 99Food"] == "NÃO")
+            ]
+            if not df_sem_delivery.empty:
+                df_sem_delivery.to_excel(writer, sheet_name="Sem Delivery", index=False)
+
         # === ABA 2: RESTAURANTES MAPS ===
         if dados_maps:
             registros_maps = []
@@ -254,7 +279,7 @@ def exportar_excel(cidade: str = None, uf: str = None) -> str:
                     "Cidade": d["cidade"],
                     "UF": d["uf"],
                     "Endereço": d["endereco"],
-                    "Telefone": d["telefone"],
+                    "Tel. Google Maps": d["telefone"],
                     "Website": d["website"],
                     "Rating": d["rating"],
                     "Avaliações": d["total_reviews"],
@@ -263,7 +288,7 @@ def exportar_excel(cidade: str = None, uf: str = None) -> str:
                     "CNPJ": d.get("cnpj", ""),
                     "Razão Social": d.get("razao_social", ""),
                     "Email (Receita)": d.get("email_receita", ""),
-                    "Telefone (Receita)": d.get("telefones_receita", ""),
+                    "Tel. Receita Federal": d.get("telefones_receita", ""),
                     "Tel. Proprietário": d.get("telefone_proprietario", ""),
                     "Sócios": d.get("socios_nomes", ""),
                     "Score Confiança": f"{d.get('score_confianca', 0):.0%}" if d.get("score_confianca") else "",

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Editar Template — Derekh CRM{% endblock %}
+{% block page_title %}Editar: {{ template.nome }}{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+    <form method="post" action="/api/email/templates/{{ template.id }}/editar" class="card space-y-4">
+        <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Nome do Template</label>
+            <input type="text" name="nome" class="input" required value="{{ template.nome }}">
+        </div>
+        <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Assunto do Email</label>
+            <input type="text" name="assunto" class="input" required value="{{ template.assunto }}">
+        </div>
+        <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Segmento Alvo</label>
+            <select name="segmento_alvo" class="select">
+                <option value="">Todos</option>
+                {% for s in ['quente', 'premium', 'novo', 'frio', 'rede'] %}
+                <option value="{{ s }}" {% if template.segmento_alvo == s %}selected{% endif %}>{{ s|capitalize }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Corpo HTML</label>
+            <textarea name="corpo_html" rows="16" class="input font-mono text-xs" required>{{ template.corpo_html }}</textarea>
+            <p class="text-xs text-slate-400 mt-1">
+                Variáveis: {nome_dono}, {nome_restaurante}, {razao_social}, {cidade}, {uf}, {rating}, {total_avaliacoes}, {capital_social}, {porte}, {cnpj}
+            </p>
+        </div>
+        <div class="flex gap-3">
+            <button type="submit" class="btn btn-primary">Salvar</button>
+            <a href="/email/templates" class="btn btn-secondary">Cancelar</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

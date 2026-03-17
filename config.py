@@ -59,23 +59,6 @@ USER_AGENTS = [
 BRASIL_API_BASE = "https://brasilapi.com.br/api"
 BRASIL_API_CNPJ = f"{BRASIL_API_BASE}/cnpj/v2"
 
-# iFood - URL base para busca
-IFOOD_SEARCH_URL = "https://www.ifood.com.br/busca"
-
-# cnpj.biz - Detalhamento com telefone do proprietário
-CNPJBIZ_URL = "https://cnpj.biz"
-CNPJBIZ_DELAY_MIN = 5
-CNPJBIZ_DELAY_MAX = 12
-CNPJBIZ_TIMEOUT = 45000
-
-# cnpj.biz - Retry e concorrência (v3.1)
-CNPJBIZ_MAX_RETRIES = 3
-CNPJBIZ_RETRY_BACKOFF = [5, 10, 20]  # segundos entre retries
-CNPJBIZ_CONCURRENT_TABS = 7
-CNPJBIZ_REVEAL_WAIT = 4  # segundos após revealAllContacts()
-CNPJBIZ_CLOUDFLARE_PAUSE_MIN = 30  # pausa quando detecta bloqueio
-CNPJBIZ_CLOUDFLARE_PAUSE_MAX = 60
-
 # Google Maps - Busca direcionada por CNPJ
 GMAPS_DIRECTED_CONCURRENT_TABS = 5
 GMAPS_DIRECTED_DELAY_MIN = 5
@@ -83,7 +66,7 @@ GMAPS_DIRECTED_DELAY_MAX = 12
 GMAPS_DIRECTED_MAX_RETRIES = 2
 GMAPS_DIRECTED_RETRY_BACKOFF = [5, 15]
 GMAPS_DIRECTED_SCORE_MINIMO = 0.50
-GMAPS_DIRECTED_TIMEOUT = 45000
+GMAPS_DIRECTED_TIMEOUT = 20000  # 20s (reduzido de 45s)
 
 # Diretório de logs
 LOGS_DIR = os.path.join(BASE_DIR, "Logs_secoes")
@@ -146,9 +129,106 @@ CNAES_RESTAURANTE = {"5611201", "5611202", "5611203", "5612100"}
 # Número de arquivos de Estabelecimentos (0 a 9)
 NUM_ARQUIVOS_ESTABELECIMENTOS = 10
 
+# Arquivos complementares da RF (Empresas, Simples, Socios)
+RF_ARQUIVOS_COMPLEMENTARES = ["Empresas", "Simples", "Socios"]
+
+# Mapeamento de porte da RF (codigo -> descricao)
+RF_PORTE_MAP = {
+    "00": "Não Informado",
+    "01": "Micro Empresa",
+    "03": "Empresa de Pequeno Porte",
+    "05": "Demais",
+}
+
+# Mapeamento de natureza juridica da RF (codigo -> descricao) - principais
+RF_NATUREZA_MAP = {
+    "2011": "Empresa Pública",
+    "2135": "Empresário (Individual)",
+    "2305": "Sociedade Empresária Limitada",
+    "2313": "Sociedade Empresária em Nome Coletivo",
+    "2321": "Sociedade Empresária em Comandita Simples",
+    "2330": "Sociedade Empresária em Comandita por Ações",
+    "2348": "Sociedade Anônima Aberta",
+    "2356": "Sociedade Anônima Fechada",
+    "2062": "Sociedade Empresária em Conta de Participação",
+    "2070": "EIRELI",
+    "2291": "Cooperativa",
+    "2143": "Cooperativa de Consumo",
+    "2151": "Cooperativa de Crédito",
+    "3999": "Associação Privada",
+    "4014": "Empresa Individual de Responsabilidade Limitada (de Natureza Empresária)",
+    "2127": "Sociedade Empresária Limitada (Unipessoal)",
+}
+
+# Mapeamento de qualificacao de socio da RF (codigo -> descricao) - principais
+RF_QUALIFICACAO_SOCIO_MAP = {
+    "05": "Administrador",
+    "08": "Conselheiro de Administração",
+    "10": "Diretor",
+    "16": "Presidente",
+    "22": "Sócio",
+    "49": "Sócio-Administrador",
+    "50": "Sócio Comanditário",
+    "52": "Sócio com Capital",
+    "54": "Titular Pessoa Física Residente ou Domiciliado no Brasil",
+    "55": "Titular Pessoa Física Residente ou Domiciliado no Exterior",
+    "56": "Titular Pessoa Física Domiciliado no Exterior",
+    "65": "Titular Pessoa Física Residente no Brasil",
+}
+
 # UFs brasileiras (para seleção por estado)
 UFS_BRASIL = [
     "AC", "AL", "AM", "AP", "BA", "CE", "DF", "ES", "GO", "MA",
     "MG", "MS", "MT", "PA", "PB", "PE", "PI", "PR", "RJ", "RN",
     "RO", "RR", "RS", "SC", "SE", "SP", "TO",
 ]
+
+# ============================================================
+# DELIVERY - MULTI-PLATAFORMA (iFood + Rappi + 99Food)
+# ============================================================
+DELIVERY_PLATAFORMAS = {
+    "ifood": {
+        "nome": "iFood",
+        "url_busca": "https://www.ifood.com.br/busca?q={query}",
+        "seletores": '[data-card-type="MERCHANT"], a[href*="/delivery/"]',
+        "seletor_nome": "span, h3",
+        "href_prefix": "https://www.ifood.com.br",
+    },
+    "rappi": {
+        "nome": "Rappi",
+        "url_busca": "https://www.rappi.com.br/restaurantes/busca?term={query}",
+        "seletores": 'a[href*="/restaurantes/"], [data-qa="store-card"]',
+        "seletor_nome": "span, h3, p",
+        "href_prefix": "https://www.rappi.com.br",
+    },
+    "99food": {
+        "nome": "99Food",
+        "url_busca": "https://www.99food.com.br/busca?q={query}",
+        "seletores": 'a[href*="/restaurante/"], [class*="store-card"]',
+        "seletor_nome": "span, h3, p",
+        "href_prefix": "https://www.99food.com.br",
+        "url_alternativa": "https://www.didi-food.com/pt-BR",
+    },
+}
+
+# Delivery - Anti-ban com micro-batches
+DELIVERY_MICRO_BATCH_MIN = 15
+DELIVERY_MICRO_BATCH_MAX = 25
+DELIVERY_BATCH_COOLDOWN_MIN = 30
+DELIVERY_BATCH_COOLDOWN_MAX = 60
+DELIVERY_DELAY_MIN = 3
+DELIVERY_DELAY_MAX = 6
+DELIVERY_DELAY_LONG_MIN = 8
+DELIVERY_DELAY_LONG_MAX = 15
+DELIVERY_LONG_PAUSE_EVERY = 5  # pausa longa a cada N queries
+DELIVERY_TIMEOUT = 30000
+
+# ============================================================
+# BROWSER MANAGER — Pause Breaks Anti-Deteccao
+# ============================================================
+# Limite de itens processados por sessao de browser (antes de restart)
+BROWSER_SESSION_LIMIT = 500
+
+# Pause break: quantidade de itens entre breaks
+PAUSE_BREAK_MIN_ITEMS = 30
+PAUSE_BREAK_MAX_ITEMS = 50

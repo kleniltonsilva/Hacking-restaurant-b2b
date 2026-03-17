@@ -1,5 +1,8 @@
 playwright>=1.40.0
+playwright install chromium
 pandas>=2.1.0
 openpyxl>=3.1.0
-httpx>=0.25.0
+httpx[socks]>=0.25.0
 rich>=13.0.0
+stem>=1.8.0
+playwright-stealth>=1.0.6

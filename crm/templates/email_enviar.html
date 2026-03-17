@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Enviar Email — Derekh CRM{% endblock %}
+{% block page_title %}Enviar Email para {{ lead.nome_fantasia or lead.razao_social }}{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+    <div class="card mb-4">
+        <div class="flex items-center gap-4 text-sm">
+            <span class="text-slate-500">Para:</span>
+            <span class="font-medium text-slate-800">{{ lead.email or 'Sem email' }}</span>
+            {% if lead.email_invalido %}
+            <span class="badge bg-red-100 text-red-700">Email Inválido</span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if lead.email and not lead.email_invalido %}
+    <form method="post" action="/api/email/enviar/{{ lead.id }}" class="card space-y-4">
+        <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1">Template</label>
+            <select name="template_id" id="template-select" class="select" required
+                    onchange="previewTemplate()">
+                <option value="">Selecione um template...</option>
+                {% for t in templates %}
+                <option value="{{ t.id }}">{{ t.nome }} — {{ t.assunto }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <!-- Preview -->
+        <div id="email-preview" class="hidden border border-slate-200 rounded-lg overflow-hidden">
+            <div class="bg-slate-50 px-4 py-2 border-b border-slate-200">
+                <p class="text-xs text-slate-500">Assunto: <span id="preview-assunto" class="text-slate-700 font-medium"></span></p>
+            </div>
+            <div id="preview-corpo" class="p-4 text-sm"></div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Enviar Email</button>
+    </form>
+    {% else %}
+    <div class="card">
+        <p class="text-sm text-slate-400">Não é possível enviar email para este lead.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function previewTemplate() {
+    const templateId = document.getElementById('template-select').value;
+    const previewDiv = document.getElementById('email-preview');
+    if (!templateId) {
+        previewDiv.classList.add('hidden');
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/email/preview?template_id=${templateId}&lead_id={{ lead.id }}`);
+        const data = await resp.json();
+        if (data.erro) {
+            previewDiv.classList.add('hidden');
+            return;
+        }
+        document.getElementById('preview-assunto').textContent = data.assunto;
+        document.getElementById('preview-corpo').innerHTML = data.corpo_html;
+        previewDiv.classList.remove('hidden');
+    } catch(e) {
+        console.error(e);
+    }
+}
+</script>
+{% endblock %}

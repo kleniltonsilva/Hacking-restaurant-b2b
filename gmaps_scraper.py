@@ -16,9 +16,14 @@ from config import (
     GMAPS_DIRECTED_CONCURRENT_TABS, GMAPS_DIRECTED_DELAY_MIN,
     GMAPS_DIRECTED_DELAY_MAX, GMAPS_DIRECTED_MAX_RETRIES,
     GMAPS_DIRECTED_RETRY_BACKOFF, GMAPS_DIRECTED_SCORE_MINIMO,
-    GMAPS_DIRECTED_TIMEOUT,
+    GMAPS_DIRECTED_TIMEOUT, BROWSER_SESSION_LIMIT,
 )
 from logger import log
+from browser_manager import (
+    criar_browser as bm_criar_browser, fechar_browser,
+    gerar_limite_pause_break, gerar_pausa_break,
+    CircuitBreaker, resetar_tab,
+)
 
 
 async def _delay(min_s: float = None, max_s: float = None):
@@ -50,6 +55,7 @@ async def _criar_browser(headless: bool = True) -> tuple:
             "--disable-infobars",
             "--window-size=1920,1080",
             "--disable-extensions",
+            "--no-proxy-server",
         ]
     )
     
@@ -333,6 +339,9 @@ async def scrape_restaurantes_cidade(cidade: str, uf: str, headless: bool = True
 
         log.info(f"[LOG] 🏪 Extraindo detalhes de {total} restaurantes...")
 
+        # Pause break preventivo durante extracao
+        proximo_pause_break = gerar_limite_pause_break()
+
         for i in range(total):
             try:
                 card = cards.nth(i)
@@ -379,8 +388,14 @@ async def scrape_restaurantes_cidade(cidade: str, uf: str, headless: bool = True
                     if callback:
                         callback(dados)
 
+                # Pause break preventivo (pausa longa sem fechar browser)
+                if (i + 1) == proximo_pause_break:
+                    pausa = min(gerar_pausa_break(), 5 * 60)  # Max 5 min dentro da sessao
+                    log.info(f"[LOG] Pausa de seguranca estendida: {pausa/60:.1f}min ({i+1}/{total})")
+                    await asyncio.sleep(pausa)
+                    proximo_pause_break += gerar_limite_pause_break()
                 # Delay entre extrações para não ser bloqueado
-                if (i + 1) % 10 == 0:
+                elif (i + 1) % 10 == 0:
                     log.info(f"[LOG] ⏳ Pausa de segurança... ({i+1}/{total})")
                     await _delay(5, 10)
                 else:
@@ -746,46 +761,49 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
     return {}
 
 
-async def _buscar_um_cnpj_maps(page, cnpj_data: dict, semaphore, stats: dict) -> dict:
-    """
-    Wrapper com semaphore + retry para buscar um CNPJ no Maps.
-    Auto-ajusta delays se muitas falhas consecutivas.
-    """
-    async with semaphore:
-        cnpj = cnpj_data.get("cnpj", "???")
+async def _buscar_um_cnpj_maps(page, cnpj_data: dict, stats: dict,
+                               circuit_breaker=None) -> dict:
+    """Wrapper com retry para buscar um CNPJ no Maps.
+    Sem semaphore — cada tab opera independente na sua page."""
+    cnpj = cnpj_data.get("cnpj", "???")
 
-        for tentativa in range(GMAPS_DIRECTED_MAX_RETRIES + 1):
-            try:
-                resultado = await _buscar_cnpj_no_maps(page, cnpj_data)
+    for tentativa in range(GMAPS_DIRECTED_MAX_RETRIES + 1):
+        try:
+            resultado = await _buscar_cnpj_no_maps(page, cnpj_data)
 
-                if resultado:
-                    stats["encontrados"] += 1
-                    stats["falhas_consecutivas"] = 0
-                    return {"cnpj_data": cnpj_data, "maps_data": resultado}
+            if resultado:
+                stats["encontrados"] += 1
+                if circuit_breaker:
+                    circuit_breaker.registrar_sucesso()
+                return {"cnpj_data": cnpj_data, "maps_data": resultado}
+            else:
+                stats["nao_encontrados"] += 1
+                if circuit_breaker:
+                    circuit_breaker.registrar_sucesso()
+                return {"cnpj_data": cnpj_data, "maps_data": {}}
+
+        except Exception as e:
+            is_timeout = "Timeout" in str(e) or "timeout" in str(e)
+            if circuit_breaker:
+                if is_timeout:
+                    circuit_breaker.registrar_timeout()
                 else:
-                    stats["nao_encontrados"] += 1
-                    stats["falhas_consecutivas"] = 0
-                    return {"cnpj_data": cnpj_data, "maps_data": {}}
+                    circuit_breaker.registrar_erro()
 
-            except Exception as e:
-                stats["falhas_consecutivas"] = stats.get("falhas_consecutivas", 0) + 1
-                if tentativa < GMAPS_DIRECTED_MAX_RETRIES:
-                    backoff = GMAPS_DIRECTED_RETRY_BACKOFF[tentativa]
-                    # Auto-ajuste: se muitas falhas, aumentar delay
-                    if stats["falhas_consecutivas"] > 3:
-                        backoff = int(backoff * 1.5)
-                        log.warning(f"[MAPS-DIR] ⚠️ {stats['falhas_consecutivas']} falhas consecutivas, "
-                                  f"aumentando delay para {backoff}s")
-                    log.warning(f"[MAPS-DIR] ⚠️ {cnpj}: erro (tentativa {tentativa+1}/{GMAPS_DIRECTED_MAX_RETRIES+1}), "
-                              f"retry em {backoff}s: {e}")
-                    await asyncio.sleep(backoff)
-                else:
-                    log.error(f"[MAPS-DIR] ❌ {cnpj}: falhou apos {GMAPS_DIRECTED_MAX_RETRIES+1} tentativas: {e}")
-                    stats["erros"] += 1
-                    return {"cnpj_data": cnpj_data, "maps_data": {}}
+            # Resetar tab apos timeout para evitar navegacao conflitante
+            if is_timeout:
+                await resetar_tab(page, "[MAPS-DIR]")
 
-        # Delay entre buscas
-        await _delay(GMAPS_DIRECTED_DELAY_MIN, GMAPS_DIRECTED_DELAY_MAX)
+            if tentativa < GMAPS_DIRECTED_MAX_RETRIES:
+                backoff = GMAPS_DIRECTED_RETRY_BACKOFF[tentativa]
+                log.warning(f"[MAPS-DIR] {cnpj}: erro (tentativa {tentativa+1}/"
+                            f"{GMAPS_DIRECTED_MAX_RETRIES+1}), retry em {backoff}s: {e}")
+                await asyncio.sleep(backoff)
+            else:
+                log.error(f"[MAPS-DIR] {cnpj}: falhou apos "
+                          f"{GMAPS_DIRECTED_MAX_RETRIES+1} tentativas: {e}")
+                stats["erros"] += 1
+                return {"cnpj_data": cnpj_data, "maps_data": {}}
 
     return {"cnpj_data": cnpj_data, "maps_data": {}}
 
@@ -796,6 +814,10 @@ async def scrape_maps_direcionado(cidade: str, uf: str, headless: bool = True,
     Busca direcionada no Maps: para cada CNPJ detalhado com endereco,
     busca especificamente no Maps por aquele endereco.
 
+    v4.1: Sessoes de BROWSER_SESSION_LIMIT (500) CNPJs com pause breaks,
+    circuit breaker por tab, sem Semaphore (tabs independentes),
+    timeout reduzido para 20s, resetar_tab apos timeout.
+
     Args:
         cidade: Nome da cidade
         uf: Sigla do estado
@@ -805,94 +827,137 @@ async def scrape_maps_direcionado(cidade: str, uf: str, headless: bool = True,
     Returns:
         dict com stats: {total, encontrados, nao_encontrados, erros}
     """
+    from playwright.async_api import async_playwright
     from db_manager import buscar_cnpjs_para_maps_direcionado
 
     cnpjs = buscar_cnpjs_para_maps_direcionado(cidade, uf)
     if not cnpjs:
-        log.info(f"[MAPS-DIR] ✅ Nenhum CNPJ pendente para busca direcionada em {cidade}/{uf}")
+        log.info(f"[MAPS-DIR] Nenhum CNPJ pendente para busca direcionada em {cidade}/{uf}")
         return {"total": 0, "encontrados": 0, "nao_encontrados": 0, "erros": 0}
 
-    log.info(f"[MAPS-DIR] 🎯 {len(cnpjs)} CNPJs para busca direcionada em {cidade}/{uf}")
+    log.info(f"[MAPS-DIR] {len(cnpjs)} CNPJs para busca direcionada em {cidade}/{uf}")
 
     stats = {
         "total": len(cnpjs),
         "encontrados": 0,
         "nao_encontrados": 0,
         "erros": 0,
-        "falhas_consecutivas": 0,
     }
 
-    pw = None
-    browser = None
-    semaphore = asyncio.Semaphore(1)  # Sequencial por tab (1 busca por vez por tab)
+    processados_global = 0
 
-    try:
-        pw, browser, context, page = await _criar_browser(headless)
-        page.set_default_timeout(GMAPS_DIRECTED_TIMEOUT)
+    # Loop de sessoes de browser (BROWSER_SESSION_LIMIT por sessao)
+    while processados_global < len(cnpjs):
+        lote_fim = min(processados_global + BROWSER_SESSION_LIMIT, len(cnpjs))
+        lote = cnpjs[processados_global:lote_fim]
+        sessao_num = processados_global // BROWSER_SESSION_LIMIT + 1
 
-        # Aceitar cookies na primeira navegacao
-        await page.goto("https://www.google.com.br/maps", wait_until="domcontentloaded",
-                       timeout=GMAPS_DIRECTED_TIMEOUT)
-        await asyncio.sleep(random.uniform(3, 5))
-        await _aceitar_cookies(page)
-        await asyncio.sleep(random.uniform(1, 3))
+        log.info(f"[MAPS-DIR] === Sessao {sessao_num}: CNPJs {processados_global+1}-{lote_fim} "
+                 f"de {len(cnpjs)} ===")
 
-        # Criar tabs adicionais
-        pages = [page]
-        for _ in range(GMAPS_DIRECTED_CONCURRENT_TABS - 1):
-            new_page = await context.new_page()
-            new_page.set_default_timeout(GMAPS_DIRECTED_TIMEOUT)
-            pages.append(new_page)
+        pw = None
+        browser = None
 
-        log.info(f"[MAPS-DIR] 🌐 {len(pages)} tabs criadas")
+        try:
+            pw = await async_playwright().start()
+            browser, context, page = await bm_criar_browser(pw, headless)
+            page.set_default_timeout(GMAPS_DIRECTED_TIMEOUT)
 
-        # Distribuir CNPJs em round-robin pelas tabs
-        tab_queues = [[] for _ in range(len(pages))]
-        for i, cnpj_data in enumerate(cnpjs):
-            tab_queues[i % len(pages)].append(cnpj_data)
+            # Aceitar cookies na primeira navegacao da sessao
+            await page.goto("https://www.google.com.br/maps",
+                            wait_until="domcontentloaded",
+                            timeout=GMAPS_DIRECTED_TIMEOUT)
+            await asyncio.sleep(random.uniform(3, 5))
+            await _aceitar_cookies(page)
+            await asyncio.sleep(random.uniform(1, 3))
 
-        async def processar_fila(tab_page, fila, tab_idx):
-            for j, cnpj_data in enumerate(fila):
-                cnpj = cnpj_data.get("cnpj", "???")
-                pos = sum(len(tab_queues[t]) for t in range(tab_idx)) + j + 1
-                log.info(f"[MAPS-DIR] ({pos}/{stats['total']}) Tab{tab_idx+1}: buscando {cnpj}...")
+            # Criar tabs adicionais
+            pages = [page]
+            for _ in range(GMAPS_DIRECTED_CONCURRENT_TABS - 1):
+                new_page = await context.new_page()
+                new_page.set_default_timeout(GMAPS_DIRECTED_TIMEOUT)
+                pages.append(new_page)
 
-                resultado = await _buscar_um_cnpj_maps(tab_page, cnpj_data, semaphore, stats)
+            log.info(f"[MAPS-DIR] {len(pages)} tabs criadas")
 
-                if resultado and resultado.get("maps_data"):
-                    maps_data = resultado["maps_data"]
-                    maps_data["cidade"] = cidade
-                    maps_data["uf"] = uf
+            # Distribuir lote pelas tabs (round-robin)
+            tab_queues = [[] for _ in range(len(pages))]
+            for i, cnpj_data in enumerate(lote):
+                tab_queues[i % len(pages)].append(cnpj_data)
 
-                    if callback:
-                        callback(maps_data, cnpj_data)
+            async def processar_fila(tab_page, fila, tab_idx):
+                cb = CircuitBreaker()
+                itens_ate_pausa = gerar_limite_pause_break()
+                contador = 0
 
-                # Delay entre buscas
-                await _delay(GMAPS_DIRECTED_DELAY_MIN, GMAPS_DIRECTED_DELAY_MAX)
+                for j, cnpj_data in enumerate(fila):
+                    cnpj = cnpj_data.get("cnpj", "???")
+                    pos = processados_global + sum(len(tab_queues[t]) for t in range(tab_idx)) + j + 1
+                    log.info(f"[MAPS-DIR] ({pos}/{stats['total']}) Tab{tab_idx+1}: buscando {cnpj}...")
 
-        # Executar todas as tabs em paralelo
-        tasks = []
-        for idx, (tab_page, fila) in enumerate(zip(pages, tab_queues)):
-            if fila:
-                tasks.append(processar_fila(tab_page, fila, idx))
+                    # Circuit breaker check
+                    acao = await cb.verificar("[MAPS-DIR]")
+                    if acao == "pausa_longa":
+                        await resetar_tab(tab_page)
 
-        await asyncio.gather(*tasks)
+                    resultado = await _buscar_um_cnpj_maps(
+                        tab_page, cnpj_data, stats, circuit_breaker=cb
+                    )
 
-    except Exception as e:
-        log.error(f"[MAPS-DIR] ❌ Erro geral: {e}")
-    finally:
-        if browser:
-            await browser.close()
-        if pw:
-            await pw.stop()
+                    if resultado and resultado.get("maps_data"):
+                        maps_data = resultado["maps_data"]
+                        maps_data["cidade"] = cidade
+                        maps_data["uf"] = uf
+                        if callback:
+                            callback(maps_data, cnpj_data)
 
-    log.info(f"[MAPS-DIR] ═══ RESULTADO BUSCA DIRECIONADA {cidade}/{uf} ═══")
-    log.info(f"  Total CNPJs:      {stats['total']}")
-    log.info(f"  🟢 Encontrados:   {stats['encontrados']}")
-    log.info(f"  🔴 Não encontrados: {stats['nao_encontrados']}")
-    log.info(f"  ❌ Erros:          {stats['erros']}")
+                    # Delay entre buscas
+                    await _delay(GMAPS_DIRECTED_DELAY_MIN, GMAPS_DIRECTED_DELAY_MAX)
+
+                    # Pause break por tab (pausa individual, sem fechar browser)
+                    contador += 1
+                    if contador >= itens_ate_pausa:
+                        pausa = min(gerar_pausa_break(), 5 * 60)  # Max 5 min por tab
+                        log.info(f"[MAPS-DIR] Tab{tab_idx+1}: pausa {pausa/60:.1f}min "
+                                 f"({contador} itens processados)")
+                        await asyncio.sleep(pausa)
+                        contador = 0
+                        itens_ate_pausa = gerar_limite_pause_break()
+
+            # Executar todas as tabs em paralelo
+            tasks = []
+            for idx, (tab_page, fila) in enumerate(zip(pages, tab_queues)):
+                if fila:
+                    tasks.append(processar_fila(tab_page, fila, idx))
+
+            await asyncio.gather(*tasks)
+
+        except Exception as e:
+            log.error(f"[MAPS-DIR] Erro na sessao {sessao_num}: {e}")
+        finally:
+            await fechar_browser(browser)
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+
+        processados_global = lote_fim
+
+        # PAUSE BREAK entre sessoes (browser ja fechado)
+        if processados_global < len(cnpjs):
+            duracao = gerar_pausa_break()
+            log.info(f"[MAPS-DIR] Pause break entre sessoes: {duracao/60:.1f}min "
+                     f"({processados_global}/{len(cnpjs)} processados)")
+            await asyncio.sleep(duracao)
+
+    log.info(f"[MAPS-DIR] === RESULTADO BUSCA DIRECIONADA {cidade}/{uf} ===")
+    log.info(f"  Total CNPJs:        {stats['total']}")
+    log.info(f"  Encontrados:        {stats['encontrados']}")
+    log.info(f"  Nao encontrados:    {stats['nao_encontrados']}")
+    log.info(f"  Erros:              {stats['erros']}")
     if stats['total'] > 0:
         taxa = stats['encontrados'] / stats['total'] * 100
-        log.info(f"  📊 Taxa de match: {taxa:.1f}%")
+        log.info(f"  Taxa de match:      {taxa:.1f}%")
 
     return stats

@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+{% block title %}Scanner — Derekh CRM{% endblock %}
+{% block page_title %}Scanner de Leads{% endblock %}
+
+{% block header_actions %}
+{% if scan_ativo %}
+<span class="badge bg-amber-100 text-amber-700 text-xs">Scan ativo #{{ scan_ativo.id }}</span>
+<a href="/scanner/job/{{ scan_ativo.id }}" class="btn btn-primary text-xs">Ver Progresso</a>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+
+<!-- INICIAR NOVO SCAN -->
+<div class="card mb-8">
+    <h3 class="text-lg font-bold text-slate-800 mb-1">Iniciar Varredura</h3>
+    <p class="text-xs text-slate-500 mb-6">Selecione cidades e etapas do pipeline para escanear</p>
+
+    <form action="/api/scan/start" method="POST" id="formScan">
+
+        <!-- Selecao de cidades -->
+        <div class="mb-6">
+            <label class="text-sm font-semibold text-slate-700 mb-3 block">Cidades Alvo</label>
+
+            <!-- Botoes rapidos -->
+            <div class="flex flex-wrap gap-2 mb-3">
+                <button type="button" onclick="selecionarTodas()" class="btn btn-secondary text-xs">Todas 27 Capitais</button>
+                <button type="button" onclick="selecionarTop10()" class="btn btn-secondary text-xs">Top 10 Capitais</button>
+                <button type="button" onclick="selecionarPendentes()" class="btn btn-secondary text-xs">Pendentes iFood</button>
+                <button type="button" onclick="limparSelecao()" class="btn btn-secondary text-xs">Limpar</button>
+            </div>
+
+            <!-- Grid de cidades com checkbox -->
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2" id="gridCidades">
+                {% for c in cidades %}
+                <label class="flex items-start gap-2 p-3 rounded-lg border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 cursor-pointer transition-colors cidade-item"
+                       data-cidade="{{ c.cidade }}" data-uf="{{ c.uf }}" data-total="{{ c.total }}"
+                       data-ifood="{{ c.ifood_checked }}" data-maps="{{ c.maps_checked }}">
+                    <input type="checkbox" name="cidade_check" value="{{ c.cidade }}|{{ c.uf }}"
+                           class="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
+                    <div class="min-w-0">
+                        <p class="text-sm font-medium text-slate-800 truncate">{{ c.cidade }}/{{ c.uf }}</p>
+                        <p class="text-xs text-slate-500">{{ c.total|format_number }} leads</p>
+                        <div class="flex gap-1 mt-1 flex-wrap">
+                            {% if c.ifood_checked > 0 %}
+                            <span class="inline-block px-1.5 py-0.5 text-[10px] rounded bg-emerald-100 text-emerald-700">iFood {{ ((c.ifood_checked / c.total * 100) if c.total > 0 else 0)|int }}%</span>
+                            {% else %}
+                            <span class="inline-block px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-700">iFood pendente</span>
+                            {% endif %}
+                            {% if c.maps_checked > 0 %}
+                            <span class="inline-block px-1.5 py-0.5 text-[10px] rounded bg-blue-100 text-blue-700">Maps {{ ((c.maps_checked / c.total * 100) if c.total > 0 else 0)|int }}%</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </label>
+                {% endfor %}
+            </div>
+            <p class="text-xs text-slate-400 mt-2" id="cidadesSelecionadas">0 cidade(s) selecionada(s)</p>
+        </div>
+
+        <!-- Etapas do pipeline -->
+        <div class="mb-6">
+            <label class="text-sm font-semibold text-slate-700 mb-3 block">Etapas do Pipeline</label>
+            <div class="flex flex-wrap gap-4">
+                <label class="flex items-center gap-2 p-3 rounded-lg border border-slate-200 hover:border-indigo-300 cursor-pointer">
+                    <input type="checkbox" name="etapa_check" value="ifood" checked
+                           class="rounded border-slate-300 text-red-600 focus:ring-red-500">
+                    <div>
+                        <p class="text-sm font-medium text-red-600">iFood</p>
+                        <p class="text-xs text-slate-500">Buscar no iFood</p>
+                    </div>
+                </label>
+                <label class="flex items-center gap-2 p-3 rounded-lg border border-slate-200 hover:border-indigo-300 cursor-pointer">
+                    <input type="checkbox" name="etapa_check" value="rappi"
+                           class="rounded border-slate-300 text-orange-600 focus:ring-orange-500">
+                    <div>
+                        <p class="text-sm font-medium text-orange-600">Rappi</p>
+                        <p class="text-xs text-slate-500">Buscar no Rappi</p>
+                    </div>
+                </label>
+                <label class="flex items-center gap-2 p-3 rounded-lg border border-slate-200 hover:border-indigo-300 cursor-pointer">
+                    <input type="checkbox" name="etapa_check" value="99food"
+                           class="rounded border-slate-300 text-purple-600 focus:ring-purple-500">
+                    <div>
+                        <p class="text-sm font-medium text-purple-600">99Food</p>
+                        <p class="text-xs text-slate-500">Buscar no 99Food</p>
+                    </div>
+                </label>
+                <label class="flex items-center gap-2 p-3 rounded-lg border border-slate-200 hover:border-indigo-300 cursor-pointer">
+                    <input type="checkbox" name="etapa_check" value="maps"
+                           class="rounded border-slate-300 text-blue-600 focus:ring-blue-500">
+                    <div>
+                        <p class="text-sm font-medium text-blue-600">Google Maps</p>
+                        <p class="text-xs text-slate-500">Busca direcionada</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+
+        <!-- Opcoes -->
+        <div class="flex items-center gap-6 mb-6">
+            <label class="flex items-center gap-2">
+                <input type="checkbox" name="headless" value="on" checked
+                       class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
+                <span class="text-sm text-slate-700">Modo headless (sem janela do browser)</span>
+            </label>
+        </div>
+
+        <!-- Hidden fields para o form -->
+        <input type="hidden" name="cidades" id="inputCidades" value="">
+        <input type="hidden" name="etapas" id="inputEtapas" value="">
+
+        <!-- Botao iniciar -->
+        <div class="flex items-center gap-3">
+            <button type="submit" class="btn btn-success text-sm px-6 py-2.5" id="btnIniciar"
+                    {% if scan_ativo %}disabled title="Ja existe scan ativo"{% endif %}>
+                Iniciar Varredura
+            </button>
+            {% if scan_ativo %}
+            <span class="text-xs text-amber-600">Aguarde o scan #{{ scan_ativo.id }} finalizar</span>
+            {% endif %}
+        </div>
+    </form>
+</div>
+
+<!-- TABELA DE CIDADES - PROGRESSO -->
+<div class="card mb-8">
+    <h3 class="text-sm font-semibold text-slate-700 mb-4">Progresso por Cidade</h3>
+    <div class="overflow-x-auto">
+        <table class="table w-full text-sm">
+            <thead>
+                <tr class="border-b-2 border-slate-200">
+                    <th class="text-left">Cidade</th>
+                    <th class="text-right">Total Leads</th>
+                    <th class="text-right">Maps</th>
+                    <th class="text-right text-red-600">iFood</th>
+                    <th class="text-right text-orange-600">Rappi</th>
+                    <th class="text-right text-purple-600">99Food</th>
+                    <th class="text-right text-emerald-600">Sem Delivery</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for c in cidades %}
+            <tr class="hover:bg-slate-50">
+                <td class="font-medium">{{ c.cidade }}/{{ c.uf }}</td>
+                <td class="text-right">{{ c.total|format_number }}</td>
+                <td class="text-right">
+                    {% if c.maps_checked > 0 %}
+                    <span class="text-blue-600 font-semibold">{{ c.com_maps|format_number }}</span>
+                    <span class="text-xs text-slate-400">/ {{ c.maps_checked|format_number }}</span>
+                    {% else %}
+                    <span class="text-slate-300">-</span>
+                    {% endif %}
+                </td>
+                <td class="text-right">
+                    {% if c.ifood_checked > 0 %}
+                    <span class="text-red-600 font-semibold">{{ c.com_ifood|format_number }}</span>
+                    <span class="text-xs text-slate-400">/ {{ c.ifood_checked|format_number }}</span>
+                    {% else %}
+                    <span class="text-slate-300">-</span>
+                    {% endif %}
+                </td>
+                <td class="text-right">
+                    {% if c.rappi_checked > 0 %}
+                    <span class="text-orange-600 font-semibold">{{ c.com_rappi|format_number }}</span>
+                    <span class="text-xs text-slate-400">/ {{ c.rappi_checked|format_number }}</span>
+                    {% else %}
+                    <span class="text-slate-300">-</span>
+                    {% endif %}
+                </td>
+                <td class="text-right">
+                    {% if c.food99_checked > 0 %}
+                    <span class="text-purple-600 font-semibold">{{ c.com_99food|format_number }}</span>
+                    <span class="text-xs text-slate-400">/ {{ c.food99_checked|format_number }}</span>
+                    {% else %}
+                    <span class="text-slate-300">-</span>
+                    {% endif %}
+                </td>
+                <td class="text-right">
+                    {% set sem = c.total - c.com_ifood - c.com_rappi - c.com_99food %}
+                    {% if c.ifood_checked > 0 %}
+                    <span class="text-emerald-600 font-semibold">{{ (c.ifood_checked - c.com_ifood)|format_number }}</span>
+                    {% else %}
+                    <span class="text-slate-300">-</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- HISTORICO DE SCANS -->
+<div class="card">
+    <h3 class="text-sm font-semibold text-slate-700 mb-4">Historico de Varreduras</h3>
+    {% if jobs %}
+    <div class="overflow-x-auto">
+        <table class="table w-full text-sm">
+            <thead>
+                <tr class="border-b-2 border-slate-200">
+                    <th class="text-left">#</th>
+                    <th class="text-left">Cidades</th>
+                    <th class="text-left">Etapas</th>
+                    <th class="text-right">Processados</th>
+                    <th class="text-right">Encontrados</th>
+                    <th class="text-left">Status</th>
+                    <th class="text-left">Inicio</th>
+                    <th class="text-left"></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for j in jobs %}
+            <tr class="hover:bg-slate-50">
+                <td class="font-medium">#{{ j.id }}</td>
+                <td class="max-w-[200px] truncate" title="{{ j.cidades }}">
+                    {% set cids = j.cidades if j.cidades is string else (j.cidades|tojson) %}
+                    {{ cids[:60] }}{% if cids|length > 60 %}...{% endif %}
+                </td>
+                <td>
+                    {% set etps = j.etapas if j.etapas is string else (j.etapas|tojson) %}
+                    {{ etps }}
+                </td>
+                <td class="text-right">{{ (j.processados or 0)|format_number }}</td>
+                <td class="text-right font-semibold text-emerald-600">{{ (j.encontrados or 0)|format_number }}</td>
+                <td>
+                    {% if j.status == 'executando' %}
+                    <span class="badge bg-blue-100 text-blue-700">Executando</span>
+                    {% elif j.status == 'concluido' %}
+                    <span class="badge bg-emerald-100 text-emerald-700">Concluido</span>
+                    {% elif j.status == 'cancelado' %}
+                    <span class="badge bg-amber-100 text-amber-700">Cancelado</span>
+                    {% elif j.status == 'erro' %}
+                    <span class="badge bg-red-100 text-red-700">Erro</span>
+                    {% else %}
+                    <span class="badge bg-slate-100 text-slate-600">{{ j.status }}</span>
+                    {% endif %}
+                </td>
+                <td class="text-xs text-slate-500">{{ j.created_at|format_datetime }}</td>
+                <td>
+                    <a href="/scanner/job/{{ j.id }}" class="text-indigo-600 hover:text-indigo-800 text-xs font-medium">Ver</a>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="text-sm text-slate-400">Nenhuma varredura realizada ainda.</p>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const cidadesData = {{ cidades_json|safe }};
+
+// Top 10 capitais por relevancia
+const top10 = [
+    'SAO PAULO|SP', 'RIO DE JANEIRO|RJ', 'BELO HORIZONTE|MG',
+    'CURITIBA|PR', 'PORTO ALEGRE|RS', 'SALVADOR|BA',
+    'BRASILIA|DF', 'FORTALEZA|CE', 'RECIFE|PE', 'GOIANIA|GO'
+];
+
+function getCheckboxes() {
+    return document.querySelectorAll('input[name="cidade_check"]');
+}
+
+function atualizarContador() {
+    const checked = document.querySelectorAll('input[name="cidade_check"]:checked');
+    document.getElementById('cidadesSelecionadas').textContent =
+        checked.length + ' cidade(s) selecionada(s)';
+}
+
+function selecionarTodas() {
+    getCheckboxes().forEach(cb => cb.checked = true);
+    atualizarContador();
+}
+
+function selecionarTop10() {
+    getCheckboxes().forEach(cb => {
+        cb.checked = top10.includes(cb.value);
+    });
+    atualizarContador();
+}
+
+function selecionarPendentes() {
+    getCheckboxes().forEach(cb => {
+        const item = cb.closest('.cidade-item');
+        const ifoodChecked = parseInt(item.dataset.ifood || '0');
+        const total = parseInt(item.dataset.total || '0');
+        cb.checked = (ifoodChecked < total);
+    });
+    atualizarContador();
+}
+
+function limparSelecao() {
+    getCheckboxes().forEach(cb => cb.checked = false);
+    atualizarContador();
+}
+
+// Atualizar contador ao clicar
+document.getElementById('gridCidades').addEventListener('change', atualizarContador);
+
+// Interceptar submit do form
+document.getElementById('formScan').addEventListener('submit', function(e) {
+    // Coletar cidades selecionadas
+    const cidadesArr = [];
+    document.querySelectorAll('input[name="cidade_check"]:checked').forEach(cb => {
+        cidadesArr.push(cb.value);
+    });
+
+    if (cidadesArr.length === 0) {
+        e.preventDefault();
+        alert('Selecione pelo menos uma cidade.');
+        return;
+    }
+
+    // Coletar etapas
+    const etapasArr = [];
+    document.querySelectorAll('input[name="etapa_check"]:checked').forEach(cb => {
+        etapasArr.push(cb.value);
+    });
+
+    if (etapasArr.length === 0) {
+        e.preventDefault();
+        alert('Selecione pelo menos uma etapa.');
+        return;
+    }
+
+    // Setar hidden fields
+    document.getElementById('inputCidades').value = cidadesArr.join(',');
+    document.getElementById('inputEtapas').value = etapasArr.join(',');
+
+    // Desabilitar botao
+    document.getElementById('btnIniciar').disabled = true;
+    document.getElementById('btnIniciar').textContent = 'Iniciando...';
+});
+</script>
+{% endblock %}

@@ -1,6 +1,6 @@
 """
 init_db.py - Inicialização do banco de dados SQLite
-v3.0 - Inclui tabela cnpjs_receita com telefone proprietário (cnpj.biz)
+v4.0 - RF Expandido (Empresas/Simples/Socios) + Multi-delivery (Rappi/99Food)
 """
 import sqlite3
 from config import DB_PATH
@@ -22,6 +22,20 @@ def _migrar_banco(conn):
         ("multi_restaurante", "INTEGER DEFAULT 0"),
         ("tentativas_falha", "INTEGER DEFAULT 0"),
         ("ultima_falha", "TEXT"),
+        # v4.0 - RF Expandido
+        ("enriquecido_rf", "INTEGER DEFAULT 0"),
+        ("email_proprietario", "TEXT"),
+        ("tipo_negocio", "TEXT"),
+        ("data_opcao_simples", "TEXT"),
+        ("data_situacao_cadastral", "TEXT"),
+        ("cnpjbiz_inexistente", "INTEGER DEFAULT 0"),
+        # v4.0 - Multi-delivery
+        ("tem_rappi", "INTEGER DEFAULT 0"),
+        ("rappi_nome", "TEXT"),
+        ("rappi_url", "TEXT"),
+        ("tem_99food", "INTEGER DEFAULT 0"),
+        ("food99_nome", "TEXT"),
+        ("food99_url", "TEXT"),
     ]
     for coluna, tipo in migracoes_receita:
         try:
@@ -32,6 +46,13 @@ def _migrar_banco(conn):
     # Colunas novas em restaurantes
     migracoes_restaurantes = [
         ("telefone_proprietario", "TEXT"),
+        # v4.0 - Multi-delivery
+        ("tem_rappi", "INTEGER DEFAULT 0"),
+        ("rappi_nome", "TEXT"),
+        ("rappi_url", "TEXT"),
+        ("tem_99food", "INTEGER DEFAULT 0"),
+        ("food99_nome", "TEXT"),
+        ("food99_url", "TEXT"),
     ]
     for coluna, tipo in migracoes_restaurantes:
         try:
@@ -149,7 +170,18 @@ def init_database():
             restaurante_id INTEGER,
             score_match REAL,
             matched INTEGER DEFAULT 0,
-            multi_restaurante INTEGER DEFAULT 0
+            multi_restaurante INTEGER DEFAULT 0,
+
+            -- v4.0: RF Expandido
+            enriquecido_rf INTEGER DEFAULT 0,
+
+            -- v4.0: Multi-delivery
+            tem_rappi INTEGER DEFAULT 0,
+            rappi_nome TEXT,
+            rappi_url TEXT,
+            tem_99food INTEGER DEFAULT 0,
+            food99_nome TEXT,
+            food99_url TEXT
         )
     """)
 
@@ -203,6 +235,7 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_receita_endereco ON cnpjs_receita(logradouro, numero, cidade)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_receita_matched ON cnpjs_receita(matched)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_receita_detalhado ON cnpjs_receita(detalhado)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_receita_cnpj_basico ON cnpjs_receita(SUBSTR(cnpj, 1, 8))")
 
     # Migrar banco existente (adicionar colunas novas)
     _migrar_banco(conn)

@@ -1,0 +1,500 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Derekh CRM{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block header_actions %}
+<a href="/api/scoring/recalcular" class="btn btn-secondary text-xs">Recalcular Scores</a>
+{% endblock %}
+
+{% block content %}
+<!-- KPIs Gerais -->
+<div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+    <div class="card">
+        <p class="text-xs font-medium text-slate-500 uppercase">Total Leads</p>
+        <p class="text-2xl font-bold text-slate-800 mt-1">{{ kpis.total_leads|format_number }}</p>
+    </div>
+    <div class="card">
+        <p class="text-xs font-medium text-orange-500 uppercase">Quentes</p>
+        <p class="text-2xl font-bold text-orange-600 mt-1">{{ kpis.quentes|format_number }}</p>
+    </div>
+    <div class="card">
+        <p class="text-xs font-medium text-blue-500 uppercase">No Pipeline</p>
+        <p class="text-2xl font-bold text-blue-600 mt-1">{{ kpis.no_pipeline|format_number }}</p>
+    </div>
+    <div class="card">
+        <p class="text-xs font-medium text-emerald-500 uppercase">Clientes</p>
+        <p class="text-2xl font-bold text-emerald-600 mt-1">{{ kpis.clientes|format_number }}</p>
+    </div>
+    <div class="card">
+        <p class="text-xs font-medium text-violet-500 uppercase">Emails Enviados</p>
+        <p class="text-2xl font-bold text-violet-600 mt-1">{{ kpis.get('emails_enviados', 0)|format_number }}</p>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PAINEL DE VARREDURA DELIVERY -->
+<!-- ============================================================ -->
+<div class="card mb-8">
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h3 class="text-lg font-bold text-slate-800">Varredura Delivery</h3>
+            <p class="text-xs text-slate-500 mt-0.5">Progresso de verificacao iFood, Rappi e 99Food</p>
+        </div>
+        <!-- Filtro por cidade -->
+        <div class="flex items-center gap-2">
+            <label class="text-xs font-medium text-slate-600">Filtrar cidade:</label>
+            <select id="filtroCidade" class="select text-sm w-56" onchange="filtrarDelivery()">
+                <option value="">Todas as cidades</option>
+                {% for c in delivery_cidades %}
+                <option value="{{ c.cidade }}|{{ c.uf }}">{{ c.cidade }}/{{ c.uf }} ({{ c.total|format_number }})</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+
+    <!-- KPIs Delivery -->
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6" id="deliveryKpis">
+        <div class="bg-slate-50 rounded-lg p-4 border border-slate-200">
+            <p class="text-xs font-medium text-slate-500 uppercase">Total Restaurantes</p>
+            <p class="text-xl font-bold text-slate-800 mt-1" id="dkTotal">{{ delivery.total|format_number }}</p>
+        </div>
+        <div class="bg-red-50 rounded-lg p-4 border border-red-200">
+            <p class="text-xs font-medium text-red-500 uppercase">Com iFood</p>
+            <p class="text-xl font-bold text-red-600 mt-1" id="dkIfood">{{ delivery.com_ifood|format_number }}</p>
+        </div>
+        <div class="bg-orange-50 rounded-lg p-4 border border-orange-200">
+            <p class="text-xs font-medium text-orange-500 uppercase">Com Rappi</p>
+            <p class="text-xl font-bold text-orange-600 mt-1" id="dkRappi">{{ delivery.com_rappi|format_number }}</p>
+        </div>
+        <div class="bg-purple-50 rounded-lg p-4 border border-purple-200">
+            <p class="text-xs font-medium text-purple-500 uppercase">Com 99Food</p>
+            <p class="text-xl font-bold text-purple-600 mt-1" id="dk99food">{{ delivery.com_99food|format_number }}</p>
+        </div>
+        <div class="bg-emerald-50 rounded-lg p-4 border border-emerald-200">
+            <p class="text-xs font-medium text-emerald-600 uppercase">Sem Delivery</p>
+            <p class="text-xl font-bold text-emerald-700 mt-1" id="dkSem">{{ delivery.sem_nenhum_delivery|format_number }}</p>
+            <p class="text-xs text-emerald-500 mt-0.5">oportunidade</p>
+        </div>
+        <div class="bg-blue-50 rounded-lg p-4 border border-blue-200">
+            <p class="text-xs font-medium text-blue-500 uppercase">Em Alguma Plat.</p>
+            <p class="text-xl font-bold text-blue-600 mt-1" id="dkAlgum">{{ delivery.com_algum_delivery|format_number }}</p>
+        </div>
+    </div>
+
+    <!-- Barras de Progresso -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <!-- iFood -->
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-semibold text-red-600">iFood</span>
+                <span class="text-xs text-slate-500" id="barIfoodLabel">
+                    {{ delivery.com_ifood|format_number }} / {{ delivery.total|format_number }}
+                </span>
+            </div>
+            <div class="w-full bg-slate-100 rounded-full h-3">
+                <div id="barIfood" class="bg-red-500 h-3 rounded-full transition-all duration-500"
+                     style="width: {{ (delivery.com_ifood / delivery.total * 100) if delivery.total > 0 else 0 }}%"></div>
+            </div>
+            <p class="text-xs text-slate-400 mt-1" id="barIfoodPct">
+                {{ "%.1f"|format((delivery.com_ifood / delivery.total * 100) if delivery.total > 0 else 0) }}% encontrados
+            </p>
+        </div>
+        <!-- Rappi -->
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-semibold text-orange-600">Rappi</span>
+                <span class="text-xs text-slate-500" id="barRappiLabel">
+                    {{ delivery.com_rappi|format_number }} / {{ delivery.total|format_number }}
+                </span>
+            </div>
+            <div class="w-full bg-slate-100 rounded-full h-3">
+                <div id="barRappi" class="bg-orange-500 h-3 rounded-full transition-all duration-500"
+                     style="width: {{ (delivery.com_rappi / delivery.total * 100) if delivery.total > 0 else 0 }}%"></div>
+            </div>
+            <p class="text-xs text-slate-400 mt-1" id="barRappiPct">
+                {{ "%.1f"|format((delivery.com_rappi / delivery.total * 100) if delivery.total > 0 else 0) }}% encontrados
+            </p>
+        </div>
+        <!-- 99Food -->
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-semibold text-purple-600">99Food</span>
+                <span class="text-xs text-slate-500" id="bar99foodLabel">
+                    {{ delivery.com_99food|format_number }} / {{ delivery.total|format_number }}
+                </span>
+            </div>
+            <div class="w-full bg-slate-100 rounded-full h-3">
+                <div id="bar99food" class="bg-purple-500 h-3 rounded-full transition-all duration-500"
+                     style="width: {{ (delivery.com_99food / delivery.total * 100) if delivery.total > 0 else 0 }}%"></div>
+            </div>
+            <p class="text-xs text-slate-400 mt-1" id="bar99foodPct">
+                {{ "%.1f"|format((delivery.com_99food / delivery.total * 100) if delivery.total > 0 else 0) }}% encontrados
+            </p>
+        </div>
+    </div>
+
+    <!-- Graficos Delivery -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <!-- Grafico comparativo plataformas -->
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <h4 class="text-sm font-semibold text-slate-700 mb-3">Distribuicao por Plataforma</h4>
+            <canvas id="chartDeliveryPizza" height="220"></canvas>
+        </div>
+        <!-- Grafico top cidades com delivery -->
+        <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <h4 class="text-sm font-semibold text-slate-700 mb-3">Top Cidades com iFood</h4>
+            <canvas id="chartCidadesDelivery" height="220"></canvas>
+        </div>
+    </div>
+
+    <!-- Tabela por Cidade -->
+    <div>
+        <h4 class="text-sm font-semibold text-slate-700 mb-3">Detalhamento por Cidade</h4>
+        <div class="overflow-x-auto max-h-96 overflow-y-auto">
+            <table class="table w-full text-sm">
+                <thead class="sticky top-0 bg-white">
+                    <tr class="border-b-2 border-slate-200">
+                        <th class="text-left">Cidade</th>
+                        <th class="text-right">Total</th>
+                        <th class="text-right text-red-600">iFood</th>
+                        <th class="text-right text-orange-600">Rappi</th>
+                        <th class="text-right text-purple-600">99Food</th>
+                        <th class="text-right text-emerald-600">Sem Delivery</th>
+                        <th class="text-right">Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for c in delivery_cidades %}
+                <tr class="hover:bg-slate-50">
+                    <td class="font-medium">{{ c.cidade }}/{{ c.uf }}</td>
+                    <td class="text-right">{{ c.total|format_number }}</td>
+                    <td class="text-right">
+                        {% if c.com_ifood > 0 %}
+                        <span class="text-red-600 font-semibold">{{ c.com_ifood|format_number }}</span>
+                        {% else %}
+                        <span class="text-slate-300">0</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-right">
+                        {% if c.com_rappi > 0 %}
+                        <span class="text-orange-600 font-semibold">{{ c.com_rappi|format_number }}</span>
+                        {% else %}
+                        <span class="text-slate-300">0</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-right">
+                        {% if c.com_99food > 0 %}
+                        <span class="text-purple-600 font-semibold">{{ c.com_99food|format_number }}</span>
+                        {% else %}
+                        <span class="text-slate-300">0</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-right">
+                        <span class="text-emerald-600 font-semibold">{{ c.sem_nenhum|format_number }}</span>
+                    </td>
+                    <td class="text-right">
+                        {% if c.com_ifood > 0 %}
+                        <span class="badge bg-emerald-100 text-emerald-700">Escaneado</span>
+                        {% else %}
+                        <span class="badge bg-amber-100 text-amber-700">Pendente</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Graficos Originais -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+    <!-- Funil Pipeline -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Funil do Pipeline</h3>
+        <canvas id="chartFunil" height="200"></canvas>
+    </div>
+
+    <!-- Distribuicao por Segmento -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Segmentacao</h3>
+        <canvas id="chartSegmento" height="200"></canvas>
+    </div>
+
+    <!-- Top Cidades -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Top 10 Cidades</h3>
+        <canvas id="chartCidades" height="200"></canvas>
+    </div>
+</div>
+
+<!-- Listas -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Follow-ups de hoje -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">
+            Follow-ups de Hoje
+            {% if followups %}<span class="badge bg-amber-100 text-amber-700 ml-2">{{ followups|length }}</span>{% endif %}
+        </h3>
+        {% if followups %}
+        <div class="overflow-x-auto">
+            <table class="table w-full">
+                <thead><tr>
+                    <th>Restaurante</th><th>Cidade</th><th>Score</th><th></th>
+                </tr></thead>
+                <tbody>
+                {% for lead in followups[:10] %}
+                <tr>
+                    <td class="font-medium">{{ lead.nome_fantasia or lead.razao_social or '—' }}</td>
+                    <td>{{ lead.cidade or '—' }}/{{ lead.uf or '' }}</td>
+                    <td><span class="badge {% if lead.lead_score >= 70 %}bg-orange-100 text-orange-700{% elif lead.lead_score >= 40 %}bg-blue-100 text-blue-700{% else %}bg-slate-100 text-slate-600{% endif %}">{{ lead.lead_score }}</span></td>
+                    <td><a href="/lead/{{ lead.id }}" class="text-indigo-600 hover:text-indigo-800 text-xs font-medium">Ver</a></td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-400">Nenhum follow-up agendado para hoje.</p>
+        {% endif %}
+    </div>
+
+    <!-- Leads Quentes sem Contato -->
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">
+            Leads Quentes sem Contato
+            {% if quentes %}<span class="badge bg-red-100 text-red-700 ml-2">{{ quentes|length }}</span>{% endif %}
+        </h3>
+        {% if quentes %}
+        <div class="overflow-x-auto">
+            <table class="table w-full">
+                <thead><tr>
+                    <th>Restaurante</th><th>Cidade</th><th>Score</th><th></th>
+                </tr></thead>
+                <tbody>
+                {% for lead in quentes[:10] %}
+                <tr>
+                    <td class="font-medium">{{ lead.nome_fantasia or lead.razao_social or '—' }}</td>
+                    <td>{{ lead.cidade or '—' }}/{{ lead.uf or '' }}</td>
+                    <td><span class="badge bg-orange-100 text-orange-700">{{ lead.lead_score }}</span></td>
+                    <td class="flex gap-2">
+                        {% if lead.telefone1 %}
+                        <a href="/whatsapp/enviar/{{ lead.id }}" class="text-emerald-600 hover:text-emerald-800 text-xs font-medium" target="_blank">WhatsApp</a>
+                        {% endif %}
+                        <a href="/lead/{{ lead.id }}" class="text-indigo-600 hover:text-indigo-800 text-xs font-medium">Ver</a>
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-400">Nenhum lead quente sem contato encontrado.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ============================================================
+// DADOS
+// ============================================================
+const funilData = {{ funil_json|safe }};
+const segmentoData = {{ segmentos_json|safe }};
+const cidadesData = {{ cidades_json|safe }};
+const deliveryData = {{ delivery_json|safe }};
+const deliveryCidadesData = {{ delivery_cidades_json|safe }};
+
+const pipelineCores = {
+    'novo': '#64748b', 'contactado': '#3b82f6', 'respondeu': '#06b6d4',
+    'demo_agendada': '#8b5cf6', 'proposta_enviada': '#f59e0b',
+    'negociando': '#f97316', 'cliente': '#10b981', 'perdido': '#ef4444'
+};
+const pipelineLabels = {{ PIPELINE_LABELS|tojson|safe }};
+const segmentoLabels = {{ SEGMENTO_LABELS|tojson|safe }};
+const segmentoCores = {'novo':'#94a3b8','frio':'#3b82f6','quente':'#f97316','premium':'#10b981','rede':'#8b5cf6'};
+
+function fmtNum(n) { return Number(n || 0).toLocaleString('pt-BR'); }
+
+// ============================================================
+// DELIVERY: Pizza chart
+// ============================================================
+let chartDeliveryPizza = new Chart(document.getElementById('chartDeliveryPizza'), {
+    type: 'doughnut',
+    data: {
+        labels: ['Com iFood', 'Com Rappi', 'Com 99Food', 'Sem Delivery'],
+        datasets: [{
+            data: [deliveryData.com_ifood, deliveryData.com_rappi, deliveryData.com_99food, deliveryData.sem_nenhum_delivery],
+            backgroundColor: ['#ef4444', '#f97316', '#a855f7', '#10b981'],
+            borderWidth: 2,
+            borderColor: '#fff'
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: {
+            legend: { position: 'bottom', labels: { boxWidth: 12, padding: 12 } },
+            tooltip: {
+                callbacks: {
+                    label: function(ctx) {
+                        let total = ctx.dataset.data.reduce((a,b) => a+b, 0);
+                        let pct = total > 0 ? (ctx.raw / total * 100).toFixed(1) : 0;
+                        return ctx.label + ': ' + fmtNum(ctx.raw) + ' (' + pct + '%)';
+                    }
+                }
+            }
+        }
+    }
+});
+
+// ============================================================
+// DELIVERY: Top cidades iFood (bar horizontal)
+// ============================================================
+const cidadesIfood = deliveryCidadesData
+    .filter(c => c.com_ifood > 0)
+    .sort((a,b) => b.com_ifood - a.com_ifood)
+    .slice(0, 10);
+
+new Chart(document.getElementById('chartCidadesDelivery'), {
+    type: 'bar',
+    data: {
+        labels: cidadesIfood.map(c => c.cidade),
+        datasets: [
+            {
+                label: 'Com iFood',
+                data: cidadesIfood.map(c => c.com_ifood),
+                backgroundColor: '#ef4444',
+                borderRadius: 4
+            },
+            {
+                label: 'Sem Delivery',
+                data: cidadesIfood.map(c => c.sem_nenhum),
+                backgroundColor: '#10b981',
+                borderRadius: 4
+            }
+        ]
+    },
+    options: {
+        indexAxis: 'y',
+        responsive: true,
+        plugins: {
+            legend: { position: 'bottom', labels: { boxWidth: 12 } },
+            tooltip: {
+                callbacks: {
+                    label: function(ctx) {
+                        return ctx.dataset.label + ': ' + fmtNum(ctx.raw);
+                    }
+                }
+            }
+        },
+        scales: {
+            x: { stacked: false, ticks: { callback: v => fmtNum(v) } },
+            y: { ticks: { font: { size: 11 } } }
+        }
+    }
+});
+
+// ============================================================
+// FILTRO POR CIDADE (AJAX)
+// ============================================================
+async function filtrarDelivery() {
+    const sel = document.getElementById('filtroCidade').value;
+    let url = '/api/stats/delivery';
+    if (sel) {
+        const [cidade, uf] = sel.split('|');
+        url += '?cidade=' + encodeURIComponent(cidade) + '&uf=' + encodeURIComponent(uf);
+    }
+
+    try {
+        const resp = await fetch(url);
+        const d = await resp.json();
+        const total = d.total || 1;
+
+        // Atualizar KPIs
+        document.getElementById('dkTotal').textContent = fmtNum(d.total);
+        document.getElementById('dkIfood').textContent = fmtNum(d.com_ifood);
+        document.getElementById('dkRappi').textContent = fmtNum(d.com_rappi);
+        document.getElementById('dk99food').textContent = fmtNum(d.com_99food);
+        document.getElementById('dkSem').textContent = fmtNum(d.sem_nenhum_delivery);
+        document.getElementById('dkAlgum').textContent = fmtNum(d.com_algum_delivery);
+
+        // Barras de progresso
+        const pctIfood = (d.com_ifood / total * 100);
+        const pctRappi = (d.com_rappi / total * 100);
+        const pct99 = (d.com_99food / total * 100);
+
+        document.getElementById('barIfood').style.width = pctIfood + '%';
+        document.getElementById('barIfoodLabel').textContent = fmtNum(d.com_ifood) + ' / ' + fmtNum(d.total);
+        document.getElementById('barIfoodPct').textContent = pctIfood.toFixed(1) + '% encontrados';
+
+        document.getElementById('barRappi').style.width = pctRappi + '%';
+        document.getElementById('barRappiLabel').textContent = fmtNum(d.com_rappi) + ' / ' + fmtNum(d.total);
+        document.getElementById('barRappiPct').textContent = pctRappi.toFixed(1) + '% encontrados';
+
+        document.getElementById('bar99food').style.width = pct99 + '%';
+        document.getElementById('bar99foodLabel').textContent = fmtNum(d.com_99food) + ' / ' + fmtNum(d.total);
+        document.getElementById('bar99foodPct').textContent = pct99.toFixed(1) + '% encontrados';
+
+        // Atualizar grafico pizza
+        chartDeliveryPizza.data.datasets[0].data = [d.com_ifood, d.com_rappi, d.com_99food, d.sem_nenhum_delivery];
+        chartDeliveryPizza.update();
+    } catch(e) {
+        console.error('Erro ao filtrar delivery:', e);
+    }
+}
+
+// ============================================================
+// GRAFICOS ORIGINAIS
+// ============================================================
+
+// Funil
+new Chart(document.getElementById('chartFunil'), {
+    type: 'bar',
+    data: {
+        labels: funilData.map(d => pipelineLabels[d.status_pipeline] || d.status_pipeline),
+        datasets: [{
+            data: funilData.map(d => d.total),
+            backgroundColor: funilData.map(d => pipelineCores[d.status_pipeline] || '#94a3b8'),
+            borderRadius: 6
+        }]
+    },
+    options: {
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { display: true } } }
+    }
+});
+
+// Segmento
+new Chart(document.getElementById('chartSegmento'), {
+    type: 'doughnut',
+    data: {
+        labels: segmentoData.map(d => segmentoLabels[d.segmento] || d.segmento),
+        datasets: [{
+            data: segmentoData.map(d => d.total),
+            backgroundColor: segmentoData.map(d => segmentoCores[d.segmento] || '#94a3b8')
+        }]
+    },
+    options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } } } }
+});
+
+// Top Cidades
+new Chart(document.getElementById('chartCidades'), {
+    type: 'bar',
+    data: {
+        labels: cidadesData.map(d => d.cidade),
+        datasets: [{
+            data: cidadesData.map(d => d.total),
+            backgroundColor: '#6366f1',
+            borderRadius: 4
+        }]
+    },
+    options: {
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { display: true } } }
+    }
+});
+</script>
+{% endblock %}

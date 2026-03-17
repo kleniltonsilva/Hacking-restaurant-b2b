@@ -197,7 +197,7 @@ async def _buscar_candidatos_cnpj(nome: str, cidade: str) -> list:
         pw = await async_playwright().start()
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--no-proxy-server"]
         )
         context = await browser.new_context(
             user_agent=random.choice(USER_AGENTS),

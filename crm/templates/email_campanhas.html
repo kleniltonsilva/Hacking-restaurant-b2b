@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Campanhas de Email — Derekh CRM{% endblock %}
+{% block page_title %}Campanhas de Email{% endblock %}
+
+{% block header_actions %}
+<button onclick="document.getElementById('modal-nova').classList.remove('hidden')" class="btn btn-primary">
+    + Nova Campanha
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+    {% for c in campanhas %}
+    <div class="card">
+        <div class="flex items-center justify-between">
+            <div>
+                <h3 class="text-sm font-semibold text-slate-800">{{ c.nome }}</h3>
+                <p class="text-xs text-slate-500 mt-0.5">
+                    Template: {{ c.template_nome or '—' }} &middot; Criada em {{ c.created_at|string|truncate(10, True, '') if c.created_at else '' }}
+                </p>
+            </div>
+            <div class="flex items-center gap-4">
+                {% set status_cores = {'rascunho':'slate','enviando':'blue','concluida':'emerald','pausada':'amber'} %}
+                <span class="badge bg-{{ status_cores.get(c.status, 'slate') }}-100 text-{{ status_cores.get(c.status, 'slate') }}-700">
+                    {{ c.status|capitalize }}
+                </span>
+
+                {% if c.status == 'rascunho' %}
+                <form method="post" action="/api/email/campanhas/{{ c.id }}/enviar"
+                      onsubmit="return confirm('Enviar campanha para todos os leads filtrados?')">
+                    <button type="submit" class="btn btn-success text-xs">Enviar</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Métricas -->
+        {% if c.total_enviados > 0 %}
+        <div class="grid grid-cols-4 gap-4 mt-4 pt-4 border-t border-slate-100">
+            <div>
+                <p class="text-xs text-slate-500">Enviados</p>
+                <p class="text-lg font-bold text-slate-700">{{ c.total_enviados }}</p>
+            </div>
+            <div>
+                <p class="text-xs text-slate-500">Abertos</p>
+                <p class="text-lg font-bold text-emerald-600">{{ c.total_abertos }}</p>
+                {% if c.total_enviados > 0 %}
+                <p class="text-xs text-slate-400">{{ "%.1f"|format(c.total_abertos / c.total_enviados * 100) }}%</p>
+                {% endif %}
+            </div>
+            <div>
+                <p class="text-xs text-slate-500">Clicados</p>
+                <p class="text-lg font-bold text-blue-600">{{ c.total_clicados }}</p>
+                {% if c.total_enviados > 0 %}
+                <p class="text-xs text-slate-400">{{ "%.1f"|format(c.total_clicados / c.total_enviados * 100) }}%</p>
+                {% endif %}
+            </div>
+            <div>
+                <p class="text-xs text-slate-500">Bounced</p>
+                <p class="text-lg font-bold text-red-600">{{ c.total_bounced }}</p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+
+    {% if not campanhas %}
+    <div class="text-center py-12">
+        <p class="text-slate-400 mb-4">Nenhuma campanha criada ainda.</p>
+        <button onclick="document.getElementById('modal-nova').classList.remove('hidden')" class="btn btn-primary">
+            Criar Primeira Campanha
+        </button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Modal: Nova Campanha -->
+<div id="modal-nova" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+        <form method="post" action="/api/email/campanhas">
+            <div class="p-6 border-b border-slate-200">
+                <h2 class="text-lg font-semibold text-slate-800">Nova Campanha</h2>
+            </div>
+            <div class="p-6 space-y-4">
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Nome da Campanha</label>
+                    <input type="text" name="nome" class="input" required placeholder="Ex: Campanha Março - Sem Delivery">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Template</label>
+                    <select name="template_id" class="select" required>
+                        <option value="">Selecione...</option>
+                        {% for t in templates %}
+                        <option value="{{ t.id }}">{{ t.nome }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Filtro: UF</label>
+                    <input type="text" name="filtro_uf" class="input" placeholder="Ex: SP (vazio = todas)">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Filtro: Segmento</label>
+                    <select name="filtro_segmento" class="select">
+                        <option value="">Todos</option>
+                        <option value="quente">Quente</option>
+                        <option value="premium">Premium</option>
+                        <option value="novo">Novo</option>
+                        <option value="frio">Frio</option>
+                    </select>
+                </div>
+            </div>
+            <div class="p-6 border-t border-slate-200 flex justify-end gap-3">
+                <button type="button" onclick="this.closest('#modal-nova').classList.add('hidden')" class="btn btn-secondary">Cancelar</button>
+                <button type="submit" class="btn btn-primary">Criar Campanha</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

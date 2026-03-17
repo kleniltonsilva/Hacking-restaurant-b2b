@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+{% block title %}Busca de Leads — Derekh CRM{% endblock %}
+{% block page_title %}Busca de Leads{% endblock %}
+
+{% block header_actions %}
+<span class="text-sm text-slate-500">{{ total|format_number }} leads encontrados</span>
+{% endblock %}
+
+{% block content %}
+<div class="flex gap-6">
+    <!-- Sidebar de Filtros -->
+    <div class="w-64 flex-shrink-0">
+        <form method="get" action="/busca" class="card space-y-4">
+            <h3 class="text-sm font-semibold text-slate-700">Filtros</h3>
+
+            <!-- UF -->
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">UF</label>
+                <select name="uf" id="filtro-uf" class="select" onchange="carregarCidades(this.value)">
+                    <option value="">Todas</option>
+                    {% for u in ufs %}
+                    <option value="{{ u }}" {% if filtros.get('uf') == u %}selected{% endif %}>{{ u }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <!-- Cidade -->
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Cidade</label>
+                <select name="cidade" id="filtro-cidade" class="select">
+                    <option value="">Todas</option>
+                    {% for c in cidades %}
+                    <option value="{{ c.cidade }}" {% if filtros.get('cidade') == c.cidade %}selected{% endif %}>
+                        {{ c.cidade }} ({{ c.total|format_number }})
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <!-- Segmento -->
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Segmento</label>
+                <select name="segmento" class="select">
+                    <option value="">Todos</option>
+                    {% for s in segmentos %}
+                    <option value="{{ s }}" {% if filtros.get('segmento') == s %}selected{% endif %}>
+                        {{ segmento_labels.get(s, s) }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <!-- Status Pipeline -->
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Status</label>
+                <select name="status_pipeline" class="select">
+                    <option value="">Todos</option>
+                    {% for s in pipeline_status %}
+                    <option value="{{ s }}" {% if filtros.get('status_pipeline') == s %}selected{% endif %}>
+                        {{ pipeline_labels.get(s, s) }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <!-- Score Range -->
+            <div class="grid grid-cols-2 gap-2">
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Score min</label>
+                    <input type="number" name="score_min" min="0" max="100" class="input"
+                           value="{{ filtros.get('score_min', '') }}" placeholder="0">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Score max</label>
+                    <input type="number" name="score_max" min="0" max="100" class="input"
+                           value="{{ filtros.get('score_max', '') }}" placeholder="100">
+                </div>
+            </div>
+
+            <!-- Delivery -->
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-2">Delivery</label>
+                <div class="space-y-1">
+                    <label class="flex items-center gap-2 text-xs text-slate-600">
+                        <select name="tem_ifood" class="select text-xs py-1">
+                            <option value="">iFood: Todos</option>
+                            <option value="sim" {% if filtros.get('tem_ifood') == 'sim' %}selected{% endif %}>Tem iFood</option>
+                            <option value="nao" {% if filtros.get('tem_ifood') == 'nao' %}selected{% endif %}>Sem iFood</option>
+                        </select>
+                    </label>
+                    <label class="flex items-center gap-2 text-xs text-slate-600">
+                        <select name="tem_rappi" class="select text-xs py-1">
+                            <option value="">Rappi: Todos</option>
+                            <option value="sim" {% if filtros.get('tem_rappi') == 'sim' %}selected{% endif %}>Tem Rappi</option>
+                            <option value="nao" {% if filtros.get('tem_rappi') == 'nao' %}selected{% endif %}>Sem Rappi</option>
+                        </select>
+                    </label>
+                    <label class="flex items-center gap-2 text-xs text-slate-600">
+                        <select name="tem_99food" class="select text-xs py-1">
+                            <option value="">99Food: Todos</option>
+                            <option value="sim" {% if filtros.get('tem_99food') == 'sim' %}selected{% endif %}>Tem 99Food</option>
+                            <option value="nao" {% if filtros.get('tem_99food') == 'nao' %}selected{% endif %}>Sem 99Food</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Rede -->
+            <div>
+                <label class="flex items-center gap-2 text-xs text-slate-600">
+                    <input type="checkbox" name="eh_rede" value="sim"
+                           {% if filtros.get('eh_rede') == 'sim' %}checked{% endif %}
+                           class="rounded border-slate-300">
+                    Apenas redes
+                </label>
+            </div>
+
+            <!-- Busca texto -->
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Buscar</label>
+                <input type="text" name="q" class="input" placeholder="Nome, CNPJ..."
+                       value="{{ filtros.get('q', '') }}">
+            </div>
+
+            <button type="submit" class="btn btn-primary w-full">Filtrar</button>
+            <a href="/busca" class="btn btn-secondary w-full text-center">Limpar</a>
+        </form>
+    </div>
+
+    <!-- Tabela de Resultados -->
+    <div class="flex-1 min-w-0">
+        <div class="card overflow-hidden p-0">
+            <div class="overflow-x-auto">
+                <table class="table w-full">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th>Restaurante</th>
+                            <th>Cidade</th>
+                            <th>Score</th>
+                            <th>Segmento</th>
+                            <th>Status</th>
+                            <th class="text-center">iFood</th>
+                            <th class="text-center">Rappi</th>
+                            <th class="text-center">99F</th>
+                            <th>Contato</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for lead in leads %}
+                    <tr class="cursor-pointer" onclick="window.location='/lead/{{ lead.id }}'">
+                        <td>
+                            <div class="font-medium text-slate-800">{{ lead.nome_fantasia or '—' }}</div>
+                            <div class="text-xs text-slate-400">{{ lead.razao_social or '' }}</div>
+                        </td>
+                        <td class="whitespace-nowrap">{{ lead.cidade or '—' }}/{{ lead.uf or '' }}</td>
+                        <td>
+                            <span class="badge {% if lead.lead_score >= 70 %}bg-orange-100 text-orange-700{% elif lead.lead_score >= 40 %}bg-blue-100 text-blue-700{% else %}bg-slate-100 text-slate-600{% endif %}">
+                                {{ lead.lead_score }}
+                            </span>
+                        </td>
+                        <td>
+                            {% set cor = SEGMENTO_CORES.get(lead.segmento, 'gray') %}
+                            <span class="badge bg-{{ cor }}-100 text-{{ cor }}-700">
+                                {{ SEGMENTO_LABELS.get(lead.segmento, lead.segmento) }}
+                            </span>
+                        </td>
+                        <td>
+                            {% set pcor = {'novo':'slate','contactado':'blue','respondeu':'cyan','demo_agendada':'violet','proposta_enviada':'amber','negociando':'orange','cliente':'emerald','perdido':'red'} %}
+                            <span class="badge bg-{{ pcor.get(lead.status_pipeline, 'slate') }}-100 text-{{ pcor.get(lead.status_pipeline, 'slate') }}-700">
+                                {{ PIPELINE_LABELS.get(lead.status_pipeline, lead.status_pipeline) }}
+                            </span>
+                        </td>
+                        <td class="text-center">{% if lead.tem_ifood %}<span class="text-red-500">&#10003;</span>{% else %}<span class="text-slate-300">—</span>{% endif %}</td>
+                        <td class="text-center">{% if lead.tem_rappi %}<span class="text-orange-500">&#10003;</span>{% else %}<span class="text-slate-300">—</span>{% endif %}</td>
+                        <td class="text-center">{% if lead.tem_99food %}<span class="text-yellow-500">&#10003;</span>{% else %}<span class="text-slate-300">—</span>{% endif %}</td>
+                        <td class="text-xs">
+                            {% if lead.data_ultimo_contato %}
+                            {{ lead.data_ultimo_contato|string|truncate(10, True, '') }}
+                            {% else %}
+                            <span class="text-slate-300">Nunca</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if not leads %}
+                    <tr><td colspan="9" class="text-center py-8 text-slate-400">Nenhum lead encontrado com esses filtros.</td></tr>
+                    {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Paginação -->
+        {% if total_paginas > 1 %}
+        <div class="flex items-center justify-between mt-4">
+            <p class="text-sm text-slate-500">
+                Página {{ pagina }} de {{ total_paginas }}
+            </p>
+            <div class="flex gap-1">
+                {% if pagina > 1 %}
+                <a href="/busca?{{ request.query_params|string|replace('pagina='~pagina, 'pagina='~(pagina-1)) }}"
+                   class="btn btn-secondary text-xs">Anterior</a>
+                {% endif %}
+
+                {% for p in range(1, total_paginas + 1) %}
+                    {% if p == pagina %}
+                    <span class="btn bg-indigo-600 text-white text-xs">{{ p }}</span>
+                    {% elif p <= 3 or p >= total_paginas - 1 or (p >= pagina - 1 and p <= pagina + 1) %}
+                    <a href="/busca?{{ request.query_params|string|replace('pagina='~pagina, 'pagina='~p) if 'pagina=' in request.query_params|string else request.query_params|string ~ '&pagina=' ~ p }}"
+                       class="btn btn-secondary text-xs">{{ p }}</a>
+                    {% elif p == 4 or p == total_paginas - 2 %}
+                    <span class="text-slate-400 px-1">...</span>
+                    {% endif %}
+                {% endfor %}
+
+                {% if pagina < total_paginas %}
+                <a href="/busca?{{ request.query_params|string|replace('pagina='~pagina, 'pagina='~(pagina+1)) }}"
+                   class="btn btn-secondary text-xs">Próxima</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function carregarCidades(uf) {
+    const sel = document.getElementById('filtro-cidade');
+    sel.innerHTML = '<option value="">Todas</option>';
+    if (!uf) return;
+    try {
+        const resp = await fetch('/api/cidades?uf=' + uf);
+        const data = await resp.json();
+        data.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.cidade;
+            opt.textContent = c.cidade + ' (' + c.total.toLocaleString('pt-BR') + ')';
+            sel.appendChild(opt);
+        });
+    } catch(e) { console.error(e); }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+{% block title %}Scan #{{ job.id }} — Derekh CRM{% endblock %}
+{% block page_title %}Scan #{{ job.id }}{% endblock %}
+
+{% block header_actions %}
+<a href="/scanner" class="btn btn-secondary text-xs">Voltar ao Scanner</a>
+{% if job.status in ('pendente', 'executando') %}
+<button onclick="cancelarScan()" class="btn btn-danger text-xs" id="btnCancelar">Cancelar Scan</button>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+
+<!-- STATUS DO SCAN -->
+<div class="card mb-6">
+    <div class="flex items-start justify-between mb-4">
+        <div>
+            <div class="flex items-center gap-3 mb-2">
+                <h3 class="text-lg font-bold text-slate-800">Varredura #{{ job.id }}</h3>
+                <span id="badgeStatus">
+                    {% if job.status == 'executando' %}
+                    <span class="badge bg-blue-100 text-blue-700">Executando</span>
+                    {% elif job.status == 'concluido' %}
+                    <span class="badge bg-emerald-100 text-emerald-700">Concluido</span>
+                    {% elif job.status == 'cancelado' %}
+                    <span class="badge bg-amber-100 text-amber-700">Cancelado</span>
+                    {% elif job.status == 'erro' %}
+                    <span class="badge bg-red-100 text-red-700">Erro</span>
+                    {% else %}
+                    <span class="badge bg-slate-100 text-slate-600">{{ job.status }}</span>
+                    {% endif %}
+                </span>
+            </div>
+            <p class="text-xs text-slate-500">Criado em {{ job.created_at|format_datetime }}</p>
+        </div>
+        <div class="text-right" id="statusInfo">
+            {% if job.cidade_atual %}
+            <p class="text-sm text-slate-600">Cidade atual: <span class="font-semibold" id="cidadeAtual">{{ job.cidade_atual }}</span></p>
+            {% endif %}
+            {% if job.etapa_atual %}
+            <p class="text-xs text-slate-500">Etapa: <span class="font-medium" id="etapaAtual">{{ job.etapa_atual }}</span></p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- KPIs do Scan -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+        <div class="bg-slate-50 rounded-lg p-4 border border-slate-200">
+            <p class="text-xs font-medium text-slate-500 uppercase">Processados</p>
+            <p class="text-xl font-bold text-slate-800 mt-1" id="kpiProcessados">{{ (job.processados or 0)|format_number }}</p>
+        </div>
+        <div class="bg-emerald-50 rounded-lg p-4 border border-emerald-200">
+            <p class="text-xs font-medium text-emerald-600 uppercase">Encontrados</p>
+            <p class="text-xl font-bold text-emerald-700 mt-1" id="kpiEncontrados">{{ (job.encontrados or 0)|format_number }}</p>
+        </div>
+        <div class="bg-red-50 rounded-lg p-4 border border-red-200">
+            <p class="text-xs font-medium text-red-500 uppercase">Erros</p>
+            <p class="text-xl font-bold text-red-600 mt-1" id="kpiErros">{{ (job.erros or 0)|format_number }}</p>
+        </div>
+        <div class="bg-blue-50 rounded-lg p-4 border border-blue-200">
+            <p class="text-xs font-medium text-blue-500 uppercase">Status</p>
+            <p class="text-xl font-bold text-blue-600 mt-1" id="kpiStatus">
+                {% if job.status == 'executando' %}Em andamento
+                {% elif job.status == 'concluido' %}Finalizado
+                {% elif job.status == 'cancelado' %}Cancelado
+                {% elif job.status == 'erro' %}Falhou
+                {% else %}{{ job.status }}{% endif %}
+            </p>
+        </div>
+    </div>
+
+    <!-- Detalhes do Job -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <p class="text-xs font-medium text-slate-500 uppercase mb-1">Cidades</p>
+            <div class="flex flex-wrap gap-1">
+                {% set cids = job.cidades %}
+                {% if cids is string %}
+                <span class="badge bg-slate-100 text-slate-600">{{ cids }}</span>
+                {% elif cids is iterable %}
+                {% for c in cids %}
+                <span class="badge bg-slate-100 text-slate-600">
+                    {% if c is iterable and c is not string %}{{ c[0] }}/{{ c[1] }}{% else %}{{ c }}{% endif %}
+                </span>
+                {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+        <div>
+            <p class="text-xs font-medium text-slate-500 uppercase mb-1">Etapas</p>
+            <div class="flex flex-wrap gap-1">
+                {% set etps = job.etapas %}
+                {% if etps is string %}
+                <span class="badge bg-indigo-100 text-indigo-700">{{ etps }}</span>
+                {% elif etps is iterable %}
+                {% for e in etps %}
+                <span class="badge {% if e == 'ifood' %}bg-red-100 text-red-700{% elif e == 'rappi' %}bg-orange-100 text-orange-700{% elif e == '99food' %}bg-purple-100 text-purple-700{% elif e == 'maps' %}bg-blue-100 text-blue-700{% else %}bg-indigo-100 text-indigo-700{% endif %}">{{ e }}</span>
+                {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- LOGS EM TEMPO REAL -->
+<div class="card">
+    <div class="flex items-center justify-between mb-4">
+        <h3 class="text-sm font-semibold text-slate-700">Logs</h3>
+        <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-400" id="logCount">{{ logs|length }} linha(s)</span>
+            {% if job.status in ('pendente', 'executando') %}
+            <span class="flex items-center gap-1.5 text-xs text-blue-600" id="pollingIndicator">
+                <span class="relative flex h-2 w-2">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
+                </span>
+                Atualizando...
+            </span>
+            {% endif %}
+            <label class="flex items-center gap-1.5 text-xs text-slate-500">
+                <input type="checkbox" id="autoScroll" checked class="rounded border-slate-300 text-indigo-600 w-3 h-3">
+                Auto-scroll
+            </label>
+        </div>
+    </div>
+
+    <div id="logContainer" class="bg-slate-900 rounded-lg p-4 max-h-[600px] overflow-y-auto font-mono text-xs">
+        {% for l in logs %}
+        <div class="log-line py-0.5 {% if l.level == 'error' %}text-red-400{% elif l.level == 'warning' %}text-amber-400{% else %}text-slate-300{% endif %}">
+            <span class="text-slate-500">{{ l.hora }}</span>
+            <span class="{% if l.level == 'error' %}text-red-500{% elif l.level == 'warning' %}text-amber-500{% else %}text-slate-500{% endif %}">[{{ l.level|upper }}]</span>
+            {{ l.message }}
+        </div>
+        {% endfor %}
+        {% if not logs %}
+        <div class="text-slate-500 italic" id="logPlaceholder">Aguardando logs...</div>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const jobId = {{ job.id }};
+let jobStatus = '{{ job.status }}';
+let lastLogId = {{ logs[-1].id if logs else 0 }};
+let pollInterval = null;
+
+function fmtNum(n) { return Number(n || 0).toLocaleString('pt-BR'); }
+
+const statusBadges = {
+    'executando': '<span class="badge bg-blue-100 text-blue-700">Executando</span>',
+    'concluido': '<span class="badge bg-emerald-100 text-emerald-700">Concluido</span>',
+    'cancelado': '<span class="badge bg-amber-100 text-amber-700">Cancelado</span>',
+    'erro': '<span class="badge bg-red-100 text-red-700">Erro</span>',
+    'pendente': '<span class="badge bg-slate-100 text-slate-600">Pendente</span>',
+};
+
+const statusTexts = {
+    'executando': 'Em andamento',
+    'concluido': 'Finalizado',
+    'cancelado': 'Cancelado',
+    'erro': 'Falhou',
+    'pendente': 'Pendente',
+};
+
+const levelColors = {
+    'error': 'text-red-400',
+    'warning': 'text-amber-400',
+    'info': 'text-slate-300',
+};
+
+const levelBadgeColors = {
+    'error': 'text-red-500',
+    'warning': 'text-amber-500',
+    'info': 'text-slate-500',
+};
+
+async function pollStatus() {
+    try {
+        // Poll status
+        const resp = await fetch('/api/scan/' + jobId);
+        const data = await resp.json();
+
+        // Atualizar KPIs
+        document.getElementById('kpiProcessados').textContent = fmtNum(data.processados);
+        document.getElementById('kpiEncontrados').textContent = fmtNum(data.encontrados);
+        document.getElementById('kpiErros').textContent = fmtNum(data.erros);
+        document.getElementById('kpiStatus').textContent = statusTexts[data.status] || data.status;
+
+        // Atualizar badge
+        document.getElementById('badgeStatus').innerHTML = statusBadges[data.status] || data.status;
+
+        // Atualizar cidade/etapa
+        if (data.cidade_atual) {
+            let el = document.getElementById('cidadeAtual');
+            if (el) el.textContent = data.cidade_atual;
+        }
+        if (data.etapa_atual) {
+            let el = document.getElementById('etapaAtual');
+            if (el) el.textContent = data.etapa_atual;
+        }
+
+        // Verificar se terminou
+        if (data.status !== 'executando' && data.status !== 'pendente') {
+            jobStatus = data.status;
+            stopPolling();
+        }
+
+        // Poll logs
+        const logsResp = await fetch('/api/scan/' + jobId + '/logs?after=' + lastLogId);
+        const logs = await logsResp.json();
+
+        if (logs.length > 0) {
+            // Remover placeholder
+            const ph = document.getElementById('logPlaceholder');
+            if (ph) ph.remove();
+
+            const container = document.getElementById('logContainer');
+
+            logs.forEach(l => {
+                const div = document.createElement('div');
+                div.className = 'log-line py-0.5 ' + (levelColors[l.level] || 'text-slate-300');
+                div.innerHTML = '<span class="text-slate-500">' + l.hora + '</span> ' +
+                    '<span class="' + (levelBadgeColors[l.level] || 'text-slate-500') + '">[' + l.level.toUpperCase() + ']</span> ' +
+                    escapeHtml(l.message);
+                container.appendChild(div);
+                lastLogId = Math.max(lastLogId, l.id);
+            });
+
+            // Auto-scroll
+            if (document.getElementById('autoScroll').checked) {
+                container.scrollTop = container.scrollHeight;
+            }
+
+            // Atualizar contador
+            const totalLines = container.querySelectorAll('.log-line').length;
+            document.getElementById('logCount').textContent = totalLines + ' linha(s)';
+        }
+    } catch (e) {
+        console.error('Erro ao fazer polling:', e);
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(pollStatus, 2000);
+}
+
+function stopPolling() {
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+    const indicator = document.getElementById('pollingIndicator');
+    if (indicator) indicator.style.display = 'none';
+}
+
+async function cancelarScan() {
+    if (!confirm('Tem certeza que deseja cancelar este scan?')) return;
+
+    const btn = document.getElementById('btnCancelar');
+    btn.disabled = true;
+    btn.textContent = 'Cancelando...';
+
+    try {
+        const resp = await fetch('/api/scan/' + jobId + '/cancel', { method: 'POST' });
+        const data = await resp.json();
+        if (data.ok) {
+            jobStatus = 'cancelado';
+            stopPolling();
+            location.reload();
+        }
+    } catch (e) {
+        console.error('Erro ao cancelar:', e);
+        btn.disabled = false;
+        btn.textContent = 'Cancelar Scan';
+    }
+}
+
+// Iniciar polling se scan ativo
+if (jobStatus === 'executando' || jobStatus === 'pendente') {
+    startPolling();
+
+    // Auto-scroll inicial
+    const container = document.getElementById('logContainer');
+    container.scrollTop = container.scrollHeight;
+}
+</script>
+{% endblock %}

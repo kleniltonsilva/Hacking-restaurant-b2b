@@ -1,15 +1,17 @@
 """
-main.py - Orquestrador Principal do Restaurant BI v3.2
-Pipeline: Dados Abertos RF -> cnpj.biz (tel proprietario) -> Maps -> Cruzamento -> iFood
+main.py - Orquestrador Principal do Restaurant BI v4.0
+Pipeline: Dados Abertos RF (Estab+Empresas+Simples+Socios) -> Maps -> Delivery
 
-FLUXO:
-  [A] Importar Dados Abertos Receita Federal (Estabelecimentos)
-  [B] Detalhar CNPJs (cnpj.biz + tel proprietario)
-  [C] Varredura Google Maps (generica)
-  [F] Busca Maps Direcionada (por endereco CNPJ)
-  [D] Cruzar Enderecos (cnpj.biz x Maps)
-  [E] Verificar iFood (com nome confirmado)
-  [P] Pipeline Completo (B+F+E por cidade/estado/capitais)
+FLUXO (etapas manuais):
+  [A] Importar Dados Abertos Receita Federal (completo: Estab+Empresas+Simples+Socios)
+  [B] Busca Maps Direcionada (por endereco CNPJ)
+  [C] Varredura Google Maps (generica - por cidade)
+  [D] Cruzar Enderecos (Receita x Maps)
+  [E] Verificar Delivery Multi-plataforma (iFood + Rappi + 99Food)
+
+PIPELINES AUTOMATICOS:
+  [P] Pipeline Maps (B+C+D+E + Exportacao) - sem RF
+  [G] Pipeline Completo (A+B+C+D+E + Exportacao) - com RF
 """
 import asyncio
 import os
@@ -30,12 +32,12 @@ from gmaps_scraper import scrape_restaurantes_cidade, scrape_cidade_simples, scr
 from ifood_checker import verificar_ifood_batch
 from exporter import exportar_excel, exportar_csv
 from receita_fetcher import (
-    detalhar_cnpjs_cidade,
     estatisticas_receita, init_tabela_receita,
     obter_cnpjs_sem_ifood, atualizar_ifood_receita,
 )
 from receita_federal import (
     importar_receita_federal,
+    processar_complementares_standalone,
     selecionar_modo_importacao, selecionar_estado,
     selecionar_cidades_especificas,
 )
@@ -50,10 +52,10 @@ def limpar_tela():
 def banner():
     print("""
 ╔══════════════════════════════════════════════════════════════════╗
-║          RESTAURANT BI v3.2 - Prospeccao Inteligente            ║
-║   Dados Abertos RF x cnpj.biz (Tel Proprietario) x Maps x iFood║
+║          RESTAURANT BI v4.0 - Prospeccao Inteligente            ║
+║  RF Completo (Estab+Emp+Simples+Socios) x Maps x Multi-Delivery║
 ╠══════════════════════════════════════════════════════════════════╣
-║  RF -> cnpj.biz -> Maps -> Match -> iFood | TEL PROPRIETARIO    ║
+║  A -> B -> C -> D -> E  |  [P] Maps  [G] Completo               ║
 ╚══════════════════════════════════════════════════════════════════╝
     """)
 
@@ -61,18 +63,19 @@ def banner():
 def menu_principal():
     print("""
 ┌──────────────────────────────────────────────────────┐
-│              MENU PRINCIPAL v3.2                      │
+│              MENU PRINCIPAL v4.0                      │
 ├──────────────────────────────────────────────────────┤
-│  -- PIPELINE --                                      │
-│  [A] Importar Dados Abertos Receita Federal          │
-│  [B] Detalhar CNPJs (cnpj.biz + Tel Proprietario)    │
+│  -- ETAPAS MANUAIS --                                │
+│  [A] Importar RF Completo (Estab+Emp+Simples+Socios)│
+│  [B] Busca Maps Direcionada (por endereco CNPJ)     │
 │  [C] Varredura Maps (generica - por cidade)          │
-│  [F] Busca Maps Direcionada (por endereco CNPJ)     │
-│  [D] Cruzar Enderecos (cnpj.biz x Maps)             │
-│  [E] Verificar iFood (nome confirmado)               │
+│  [D] Cruzar Enderecos (Receita x Maps)              │
+│  [E] Verificar Delivery (iFood+Rappi+99Food)        │
+│  [R] Enriquecer RF (Empresas+Simples+Socios)        │
 │                                                      │
 │  -- AUTOMATICO --                                    │
-│  [P] Pipeline Completo (B+F+E por cidade/estado)     │
+│  [G] Pipeline Completo (A+B+C+D+E + Exportacao)     │
+│  [P] Pipeline Maps (B+C+D+E + Exportacao)            │
 │                                                      │
 │  -- CONSULTAS --                                     │
 │  [5] Consultar Banco    [6] Exportar Excel           │
@@ -179,76 +182,124 @@ async def acao_importar_receita_federal():
     input("\n[ENTER para continuar...]")
 
 
-async def acao_detalhar_cnpjs():
+async def acao_verificar_delivery():
+    """Verifica delivery multi-plataforma (iFood + Rappi + 99Food).
+    v4.0: usa delivery_checker.py com micro-batches."""
     cidade, uf = selecionar_cidade()
     if cidade == "__INVALIDO__":
         return
-    limite_input = input("\nQuantos CNPJs detalhar? [0=todos]: ").strip()
-    limite = int(limite_input) if limite_input.isdigit() else 0
+
+    # Selecionar plataformas
+    from config import DELIVERY_PLATAFORMAS
+    print("\n  Plataformas disponiveis:")
+    plats = list(DELIVERY_PLATAFORMAS.keys())
+    for i, p in enumerate(plats, 1):
+        nome = DELIVERY_PLATAFORMAS[p]["nome"]
+        print(f"  [{i}] {nome}")
+    print(f"  [0] Todas (Recomendado)")
+
+    escolha = input("Escolha: ").strip()
+    if escolha == "0" or not escolha:
+        plataformas = None  # todas
+    else:
+        try:
+            idx = int(escolha) - 1
+            if 0 <= idx < len(plats):
+                plataformas = [plats[idx]]
+            else:
+                plataformas = None
+        except ValueError:
+            plataformas = None
+
+    headless = input("Headless? [S/n]: ").strip().lower() != "n"
     cidades = [(cidade, uf)] if cidade else [(c["cidade"], c["uf"]) for c in CAPITAIS]
-    for c, u in cidades:
-        log.info(f"{'='*60}")
-        log.info(f"  📋 DETALHAMENTO: {c}/{u} (incremental)")
-        log.info(f"{'='*60}")
-        await detalhar_cnpjs_cidade(c, u, limite)
+
+    try:
+        from delivery_checker import verificar_delivery_cidade
+        for c, u in cidades:
+            log.info(f"{'='*60}")
+            log.info(f"  DELIVERY MULTI-PLATAFORMA: {c}/{u}")
+            log.info(f"{'='*60}")
+            await verificar_delivery_cidade(c, u, headless, plataformas)
+    except ImportError:
+        # Fallback: iFood-only
+        log.warning("[DELIVERY] delivery_checker.py nao encontrado - usando iFood-only")
+        for c, u in cidades:
+            cnpjs_pendentes = obter_cnpjs_sem_ifood(c, u)
+            if not cnpjs_pendentes:
+                log.info(f"[iFood] Todos CNPJs de {c}/{u} ja verificados no iFood.")
+                continue
+            items = []
+            for r in cnpjs_pendentes:
+                nome = r.get("nome_maps") or r.get("nome_fantasia") or ""
+                if not nome or nome == r.get("razao_social", ""):
+                    continue
+                items.append({"id": r["cnpj"], "nome": nome, "cidade": c})
+            if items:
+                resultados = await verificar_ifood_batch(items, headless)
+                for res in resultados:
+                    atualizar_ifood_receita(
+                        res["id"], res["tem_ifood"], res["ifood_nome"], res["ifood_url"]
+                    )
+                com = sum(1 for r in resultados if r["tem_ifood"])
+                log.info(f"[iFood] {com}/{len(resultados)} no iFood em {c}/{u}")
+
     input("\n[ENTER para continuar...]")
 
 
-async def acao_verificar_ifood():
-    """Verifica iFood usando nome confirmado (Maps ou nome_fantasia da Receita).
-    MEIs sem nome fantasia são pulados."""
-    cidade, uf = selecionar_cidade()
-    if cidade == "__INVALIDO__":
+async def acao_enriquecer_rf_complementares():
+    """Enriquece CNPJs existentes com dados complementares da RF (Empresas+Simples+Socios)."""
+    import sqlite3
+    from config import DB_PATH
+
+    conn = sqlite3.connect(DB_PATH)
+    total = conn.execute("SELECT COUNT(*) FROM cnpjs_receita").fetchone()[0]
+    enriquecidos = conn.execute(
+        "SELECT COUNT(*) FROM cnpjs_receita WHERE enriquecido_rf = 1"
+    ).fetchone()[0]
+    com_socios = conn.execute(
+        "SELECT COUNT(*) FROM cnpjs_receita WHERE socios_json IS NOT NULL AND socios_json != '[]'"
+    ).fetchone()[0]
+    conn.close()
+
+    print(f"""
+┌──────────────────────────────────────────────────────┐
+│       ENRIQUECER RF (Empresas+Simples+Socios)        │
+├──────────────────────────────────────────────────────┤
+│  CNPJs no banco:     {total:>10,}                     │
+│  Ja enriquecidos:    {enriquecidos:>10,}                     │
+│  Com socios:         {com_socios:>10,}                     │
+└──────────────────────────────────────────────────────┘
+
+  Baixa ~230MB (Empresas+Simples+Socios) e atualiza:
+  - Razao social, capital social, porte, natureza juridica
+  - Simples Nacional, MEI
+  - Socios (QSA completo)
+    """)
+
+    if total == 0:
+        print("[ERRO] Nenhum CNPJ no banco. Importe Estabelecimentos primeiro (opcao A).")
+        input("\n[ENTER para continuar...]")
         return
-    cidades = [(cidade, uf)] if cidade else [(c["cidade"], c["uf"]) for c in CAPITAIS]
 
-    for c, u in cidades:
-        cnpjs_pendentes = obter_cnpjs_sem_ifood(c, u)
-        if not cnpjs_pendentes:
-            log.info(f"[iFood] ✅ Todos CNPJs de {c}/{u} já verificados no iFood.")
-            continue
+    manter = input("Manter arquivos ZIP apos processar? [s/N]: ").strip().lower() == "s"
+    forcar = input("Forcar re-download? [s/N]: ").strip().lower() == "s"
 
-        # Escolher melhor nome: Maps > nome_fantasia > pular
-        items = []
-        pulados = 0
-        resgatados_maps = 0
-        for r in cnpjs_pendentes:
-            nome = r.get("nome_maps") or r.get("nome_fantasia") or ""
-            if not nome or nome == r.get("razao_social", ""):
-                # MEI sem nome fantasia: verificar se tem nome do Maps (match)
-                nome_maps = r.get("nome_maps") or ""
-                if nome_maps:
-                    nome = nome_maps
-                    resgatados_maps += 1
-                else:
-                    pulados += 1
-                    log.info(f"[iFood] ⏭️ {r['cnpj']}: sem nome fantasia e sem match Maps - pulado")
-                    continue
-            items.append({"id": r["cnpj"], "nome": nome, "cidade": c})
+    if input("\nIniciar enriquecimento? [S/n]: ").strip().lower() == "n":
+        return
 
-        if pulados > 0:
-            log.info(f"[iFood] ⏭️ {pulados} CNPJs pulados (sem nome fantasia e sem match Maps)")
-        if resgatados_maps > 0:
-            log.info(f"[iFood] 🔄 {resgatados_maps} MEIs resgatados via nome do Maps")
+    stats = await processar_complementares_standalone(manter, forcar)
 
-        if not items:
-            log.warning(f"[iFood] ⚠️ Nenhum CNPJ com nome válido para iFood em {c}/{u}")
-            continue
-
-        log.info(f"[iFood] 🛵 {len(items)} CNPJs de {c}/{u} para verificar no iFood")
-        if input("Continuar? [S/n]: ").strip().lower() == "n":
-            continue
-
-        headless = input("Headless? [S/n]: ").strip().lower() != "n"
-        resultados = await verificar_ifood_batch(items, headless)
-
-        for res in resultados:
-            atualizar_ifood_receita(
-                res["id"], res["tem_ifood"], res["ifood_nome"], res["ifood_url"]
-            )
-
-        com = sum(1 for r in resultados if r["tem_ifood"])
-        log.info(f"[iFood] ✅ {com}/{len(resultados)} no iFood em {c}/{u}")
+    if stats:
+        log.info(f"\n  Resumo do enriquecimento:")
+        if "empresas" in stats and stats["empresas"]:
+            log.info(f"    Empresas: {stats['empresas'].get('atualizados', 0):,} atualizados")
+        if "simples" in stats and stats["simples"]:
+            log.info(f"    Simples:  {stats['simples'].get('atualizados', 0):,} atualizados")
+        if "socios" in stats and stats["socios"]:
+            log.info(f"    Socios:   {stats['socios'].get('cnpjs_com_socios', 0):,} com socios")
+        if "marcados_detalhado" in stats:
+            log.info(f"    Detalhado=1: {stats['marcados_detalhado']:,} CNPJs")
 
     input("\n[ENTER para continuar...]")
 
@@ -403,61 +454,47 @@ def _selecionar_geografia_pipeline() -> tuple:
         return None, None, None
 
 
-async def _executar_pipeline_cidade(c: str, u: str, modo_maps: str, headless: bool):
-    """Executa B -> F/C+D -> E para uma cidade."""
+async def _executar_pipeline_cidade(c: str, u: str, headless: bool):
+    """Executa B+C+D+E para uma cidade (sempre modo hibrido).
+    B: Maps Direcionada -> C: Maps Generica -> D: Cruzamento -> E: Delivery."""
     log.info(f"{'='*70}")
-    log.info(f"  PIPELINE v3.2: {c}/{u}")
+    log.info(f"  PIPELINE v4.0: {c}/{u}")
     log.info(f"{'='*70}")
 
-    # B: Detalhar via cnpj.biz (telefone proprietario!)
-    log.info(f"-- B: cnpj.biz (Tel Proprietario) --")
-    try:
-        st = await detalhar_cnpjs_cidade(c, u, 0)
-        log.info(f"[DETALHE] {st['detalhados']} detalhados via cnpj.biz")
-    except Exception as e:
-        log.warning(f"[DETALHE] {e}")
-
-    # C: Maps (direcionada ou generica)
     st_m = {"matched": 0, "taxa": "N/A"}
 
-    if modo_maps == "1":
-        log.info(f"-- F: Maps Direcionada (por endereco CNPJ) --")
+    def on_match_pipeline(dados_maps, dados_cnpj):
+        dados_cnpj["score_match"] = dados_maps.get("score_match", 0)
+        inserir_restaurante_e_vincular(dados_maps, dados_cnpj)
 
-        def on_match_pipeline(dados_maps, dados_cnpj):
-            dados_cnpj["score_match"] = dados_maps.get("score_match", 0)
-            inserir_restaurante_e_vincular(dados_maps, dados_cnpj)
+    # B: Busca Maps Direcionada (por endereco CNPJ)
+    log.info(f"-- B: Maps Direcionada (por endereco CNPJ) --")
+    st_maps = await scrape_maps_direcionado(c, u, headless, callback=on_match_pipeline)
+    st_m = {
+        "matched": st_maps.get("encontrados", 0),
+        "taxa": f"{st_maps['encontrados']/st_maps['total']*100:.1f}%" if st_maps.get("total", 0) > 0 else "N/A",
+    }
 
-        st_maps = await scrape_maps_direcionado(c, u, headless, callback=on_match_pipeline)
-        st_m = {
-            "matched": st_maps.get("encontrados", 0),
-            "taxa": f"{st_maps['encontrados']/st_maps['total']*100:.1f}%" if st_maps.get("total", 0) > 0 else "N/A",
-        }
-    else:
-        log.info(f"-- C: Google Maps (generica) --")
-        registrar_varredura(c, u)
-        nomes_ja = nomes_restaurantes_cidade(c, u)
-        res = None
-        if modo_maps == "3":
-            res = await scrape_cidade_simples(c, u, headless)
-            if res:
-                ins = inserir_restaurantes_batch(res)
-                log.info(f"[MAPS] {ins} novos salvos")
-        else:
-            res = await scrape_restaurantes_cidade(
-                c, u, headless,
-                save_callback=inserir_restaurante,
-                nomes_existentes=nomes_ja,
-            )
-            if res:
-                log.info(f"[MAPS] {len(res)} restaurantes (salvos incrementalmente)")
-        if res:
-            finalizar_varredura(c, u, len(res))
-            for r in buscar_por_cidade(c, u):
-                if r["status"] == STATUS_PENDENTE:
-                    atualizar_status(r["id"], STATUS_PROCESSADO)
+    # C: Busca Maps Generica (cobertura ampla)
+    log.info(f"-- C: Maps Generica (cobertura ampla) --")
+    registrar_varredura(c, u)
+    nomes_ja = nomes_restaurantes_cidade(c, u)
+    res = await scrape_restaurantes_cidade(
+        c, u, headless,
+        save_callback=inserir_restaurante,
+        nomes_existentes=nomes_ja,
+    )
+    if res:
+        log.info(f"[MAPS] {len(res)} restaurantes genericos (salvos incrementalmente)")
+        finalizar_varredura(c, u, len(res))
+        for r in buscar_por_cidade(c, u):
+            if r["status"] == STATUS_PENDENTE:
+                atualizar_status(r["id"], STATUS_PROCESSADO)
 
-        log.info(f"-- D: Cruzamento Enderecos --")
-        st_m = cruzar_cidade_completa(c, u)
+    # D: Cruzamento de Enderecos
+    log.info(f"-- D: Cruzamento Enderecos --")
+    st_cruz = cruzar_cidade_completa(c, u)
+    st_m["matched"] = st_m.get("matched", 0) + st_cruz.get("matched", 0)
 
     # Detectar socios multi-restaurante
     try:
@@ -465,59 +502,107 @@ async def _executar_pipeline_cidade(c: str, u: str, modo_maps: str, headless: bo
     except Exception as e:
         log.warning(f"[MATCH] Multi-restaurante: {e}")
 
-    # E: iFood (com nome confirmado do Maps ou Receita)
-    log.info(f"-- E: iFood (nome confirmado) --")
+    # E: Delivery multi-plataforma (iFood + Rappi + 99Food)
+    log.info(f"-- E: Delivery Multi-plataforma --")
     try:
-        cnpjs_ifood = obter_cnpjs_sem_ifood(c, u)
-        if cnpjs_ifood:
-            items = []
-            pulados = 0
-            resgatados_maps = 0
-            for r in cnpjs_ifood:
-                nome = r.get("nome_maps") or r.get("nome_fantasia") or ""
-                if not nome or nome == r.get("razao_social", ""):
-                    nome_maps = r.get("nome_maps") or ""
-                    if nome_maps:
-                        nome = nome_maps
-                        resgatados_maps += 1
-                    else:
-                        pulados += 1
-                        continue
-                items.append({"id": r["cnpj"], "nome": nome, "cidade": c})
-            if pulados > 0:
-                log.info(f"[iFood] {pulados} CNPJs pulados (sem nome fantasia e sem match Maps)")
-            if resgatados_maps > 0:
-                log.info(f"[iFood] {resgatados_maps} MEIs resgatados via nome do Maps")
-            if items:
-                res_if = await verificar_ifood_batch(items, headless)
-                for r in res_if:
-                    atualizar_ifood_receita(r["id"], r["tem_ifood"], r["ifood_nome"], r["ifood_url"])
-                com = sum(1 for r in res_if if r["tem_ifood"])
-                log.info(f"[iFood] {com}/{len(res_if)} no iFood")
+        from delivery_checker import verificar_delivery_cidade
+        await verificar_delivery_cidade(c, u, headless)
+    except ImportError:
+        # Fallback: iFood-only (compatibilidade)
+        log.warning("[DELIVERY] delivery_checker.py nao encontrado - usando iFood-only")
+        try:
+            cnpjs_ifood = obter_cnpjs_sem_ifood(c, u)
+            if cnpjs_ifood:
+                items = []
+                pulados = 0
+                resgatados_maps = 0
+                for r in cnpjs_ifood:
+                    nome = r.get("nome_maps") or r.get("nome_fantasia") or ""
+                    if not nome or nome == r.get("razao_social", ""):
+                        nome_maps = r.get("nome_maps") or ""
+                        if nome_maps:
+                            nome = nome_maps
+                            resgatados_maps += 1
+                        else:
+                            pulados += 1
+                            continue
+                    items.append({"id": r["cnpj"], "nome": nome, "cidade": c})
+                if items:
+                    res_if = await verificar_ifood_batch(items, headless)
+                    for r in res_if:
+                        atualizar_ifood_receita(r["id"], r["tem_ifood"], r["ifood_nome"], r["ifood_url"])
+                    com = sum(1 for r in res_if if r["tem_ifood"])
+                    log.info(f"[iFood] {com}/{len(res_if)} no iFood")
             else:
-                log.warning(f"[iFood] Nenhum CNPJ com nome valido para iFood")
-        else:
-            log.info(f"[iFood] Todos ja verificados")
+                log.info(f"[iFood] Todos ja verificados")
+        except Exception as e:
+            log.warning(f"[iFood] {e}")
     except Exception as e:
-        log.warning(f"[iFood] {e}")
+        log.warning(f"[DELIVERY] {e}")
 
     log.info(f"[PIPELINE] {c}/{u} PRONTO! Match: {st_m.get('matched', 0)} ({st_m.get('taxa', 'N/A')})")
 
 
-async def acao_pipeline_completo():
+async def acao_pipeline_maps():
+    """Pipeline Maps [P]: B+C+D+E + Exportacao (sem importacao RF)."""
     cidades_lista, modo_rf, descricao = _selecionar_geografia_pipeline()
     if cidades_lista is None:
         return
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║              PIPELINE COMPLETO v3.2                          ║
-║  A: RF Dados Abertos -> B: cnpj.biz -> F: Maps -> E: iFood  ║
-║                  TELEFONE DO PROPRIETARIO                    ║
+║              PIPELINE MAPS v4.0                              ║
+║  B: Direcionada + C: Generica + D: Cruzamento + E: Delivery ║
 ║  Escopo: {descricao:<51}║
 ╚══════════════════════════════════════════════════════════════╝""")
 
-    # Verificar dados RF para cada cidade
+    # Verificar se tem dados RF (aviso informativo)
+    cidades_sem_dados = []
+    for c, u in cidades_lista:
+        st_rec = estatisticas_receita(normalizar_cidade(c), u)
+        if st_rec['total'] == 0:
+            cidades_sem_dados.append((c, u))
+
+    if cidades_sem_dados:
+        print(f"\n[WARN] {len(cidades_sem_dados)} cidade(s) sem dados RF importados.")
+        print(f"  A busca direcionada [B] depende de CNPJs da Receita.")
+        print(f"  Use [G] Pipeline Completo ou [A] Importar RF primeiro.")
+        if input("Continuar mesmo assim? [S/n]: ").strip().lower() == "n":
+            return
+
+    headless = input("Headless? [S/n]: ").strip().lower() != "n"
+
+    print(f"\n  {len(cidades_lista)} cidades para processar (B+C+D+E)")
+    if input("Iniciar? [S/n]: ").strip().lower() == "n":
+        return
+
+    for c, u in cidades_lista:
+        await _executar_pipeline_cidade(c, u, headless)
+
+    # Exportar
+    log.info(f"-- EXPORTACAO --")
+    if len(cidades_lista) == 1:
+        exportar_excel(cidades_lista[0][0], cidades_lista[0][1])
+    else:
+        exportar_excel()
+    input("\n[ENTER para continuar...]")
+
+
+async def acao_pipeline_completo():
+    """Pipeline Completo [G]: A+B+C+D+E + Exportacao (com importacao RF)."""
+    cidades_lista, modo_rf, descricao = _selecionar_geografia_pipeline()
+    if cidades_lista is None:
+        return
+
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║              PIPELINE COMPLETO v4.0                          ║
+║  A: RF -> B: Direcionada -> C: Generica -> D: Cruz -> E: Del║
+║       Estab + Empresas + Simples + Socios                   ║
+║  Escopo: {descricao:<51}║
+╚══════════════════════════════════════════════════════════════╝""")
+
+    # A: Importar dados RF
     cidades_sem_dados = []
     cidades_com_dados = []
     for c, u in cidades_lista:
@@ -535,6 +620,7 @@ async def acao_pipeline_completo():
                   f"{', '.join(f'{c}/{u}' for c, u in cidades_sem_dados[:5])}"
                   f"{'...' if len(cidades_sem_dados) > 5 else ''}")
         if input("Importar dados RF agora? [S/n]: ").strip().lower() != "n":
+            log.info(f"-- A: Importacao Receita Federal --")
             if modo_rf == "capitais":
                 await importar_receita_federal(modo='capitais')
             elif modo_rf == "estado":
@@ -562,19 +648,17 @@ async def acao_pipeline_completo():
             if not cidades_com_dados:
                 return
             cidades_lista = cidades_com_dados
+    else:
+        log.info(f"[RF] Todas as cidades ja tem dados RF importados.")
 
-    print("\n[1] Direcionada (busca CNPJ por endereco no Maps) (Recomendado)")
-    print("[2] Generica completa (varredura geral + cruzamento)")
-    print("[3] Generica rapida (varredura geral + cruzamento)")
-    modo_maps = input("Modo Maps (1/2/3): ").strip()
     headless = input("Headless? [S/n]: ").strip().lower() != "n"
 
-    print(f"\n  {len(cidades_lista)} cidades para processar (B->F->E)")
+    print(f"\n  {len(cidades_lista)} cidades para processar (B+C+D+E)")
     if input("Iniciar? [S/n]: ").strip().lower() == "n":
         return
 
     for c, u in cidades_lista:
-        await _executar_pipeline_cidade(c, u, modo_maps, headless)
+        await _executar_pipeline_cidade(c, u, headless)
 
     # Exportar
     log.info(f"-- EXPORTACAO --")
@@ -667,12 +751,13 @@ async def main():
         op = menu_principal()
         try:
             if op == "A": await acao_importar_receita_federal()
-            elif op == "B": await acao_detalhar_cnpjs()
+            elif op == "B": await acao_maps_direcionado()
             elif op == "C": await acao_varredura()
-            elif op == "F": await acao_maps_direcionado()
             elif op == "D": await acao_cruzar_enderecos()
-            elif op == "E": await acao_verificar_ifood()
-            elif op == "P": await acao_pipeline_completo()
+            elif op == "E": await acao_verificar_delivery()
+            elif op == "R": await acao_enriquecer_rf_complementares()
+            elif op == "G": await acao_pipeline_completo()
+            elif op == "P": await acao_pipeline_maps()
             elif op == "5": acao_consultar()
             elif op == "6":
                 c, u = selecionar_cidade()

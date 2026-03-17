@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Derekh CRM{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+        .sidebar-link { @apply flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors; }
+        .sidebar-link:hover { @apply bg-slate-700; }
+        .sidebar-link.active { @apply bg-indigo-600 text-white; }
+        .card { @apply bg-white rounded-xl shadow-sm border border-slate-200 p-5; }
+        .badge { @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium; }
+        .btn { @apply inline-flex items-center justify-center px-4 py-2 rounded-lg text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2; }
+        .btn-primary { @apply bg-indigo-600 text-white hover:bg-indigo-700 focus:ring-indigo-500; }
+        .btn-secondary { @apply bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 focus:ring-indigo-500; }
+        .btn-success { @apply bg-emerald-600 text-white hover:bg-emerald-700 focus:ring-emerald-500; }
+        .btn-danger { @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-500; }
+        .input { @apply block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500; }
+        .select { @apply block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500; }
+        .table th { @apply px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider; }
+        .table td { @apply px-4 py-3 text-sm text-slate-700; }
+        .table tr { @apply border-b border-slate-100; }
+        .table tr:hover { @apply bg-slate-50; }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body class="h-full bg-slate-50">
+    <div class="flex h-full">
+        <!-- Sidebar -->
+        <aside class="w-64 bg-slate-800 text-slate-200 flex flex-col flex-shrink-0 fixed h-full z-30">
+            <!-- Logo -->
+            <div class="px-6 py-5 border-b border-slate-700">
+                <h1 class="text-xl font-bold text-white tracking-tight">Derekh</h1>
+                <p class="text-xs text-slate-400 mt-0.5">Central de Captação</p>
+            </div>
+
+            <!-- Navigation -->
+            <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+                <a href="/" class="sidebar-link {% if pagina_ativa == 'dashboard' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+                    Dashboard
+                </a>
+                <a href="/busca" class="sidebar-link {% if pagina_ativa == 'busca' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    Busca de Leads
+                </a>
+                <a href="/pipeline" class="sidebar-link {% if pagina_ativa == 'pipeline' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7"/></svg>
+                    Pipeline
+                </a>
+
+                <div class="pt-4 pb-2 px-4">
+                    <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Marketing</p>
+                </div>
+                <a href="/email/templates" class="sidebar-link {% if pagina_ativa == 'email_templates' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                    Email Templates
+                </a>
+                <a href="/email/campanhas" class="sidebar-link {% if pagina_ativa == 'email_campanhas' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z"/></svg>
+                    Campanhas
+                </a>
+                <a href="/email/sequencias" class="sidebar-link {% if pagina_ativa == 'email_sequencias' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                    Sequências
+                </a>
+                <a href="/whatsapp" class="sidebar-link {% if pagina_ativa == 'whatsapp' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                    WhatsApp
+                </a>
+
+                <div class="pt-4 pb-2 px-4">
+                    <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Captacao</p>
+                </div>
+                <a href="/scanner" class="sidebar-link {% if pagina_ativa == 'scanner' %}active{% endif %}">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                    Scanner
+                </a>
+            </nav>
+
+            <!-- Footer -->
+            <div class="px-4 py-3 border-t border-slate-700">
+                <p class="text-xs text-slate-500">Derekh Food &copy; 2026</p>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 ml-64 overflow-y-auto">
+            <!-- Top bar -->
+            <header class="bg-white border-b border-slate-200 px-8 py-4 sticky top-0 z-20">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-lg font-semibold text-slate-800">{% block page_title %}Dashboard{% endblock %}</h2>
+                    <div class="flex items-center gap-3">
+                        {% block header_actions %}{% endblock %}
+                    </div>
+                </div>
+            </header>
+
+            <!-- Flash messages -->
+            {% if flash %}
+            <div class="mx-8 mt-4">
+                <div class="rounded-lg border px-4 py-3 text-sm
+                    {% if flash.type == 'error' %}bg-red-50 border-red-200 text-red-700
+                    {% elif flash.type == 'success' %}bg-emerald-50 border-emerald-200 text-emerald-700
+                    {% else %}bg-blue-50 border-blue-200 text-blue-700{% endif %}">
+                    {{ flash.message }}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Content -->
+            <div class="p-8">
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
