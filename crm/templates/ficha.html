@@ -267,6 +267,38 @@
 
 <!-- TAB: Ações -->
 {% elif tab == 'acoes' %}
+
+<!-- Badges de qualidade -->
+<div class="mb-6 flex flex-wrap gap-2">
+    <span class="badge {% if qualidade.tem_maps %}bg-emerald-100 text-emerald-700{% else %}bg-slate-100 text-slate-500{% endif %}">
+        {% if qualidade.tem_maps %}Maps{% else %}Sem Maps{% endif %}
+    </span>
+    <span class="badge {% if qualidade.tem_delivery_check %}bg-emerald-100 text-emerald-700{% else %}bg-amber-100 text-amber-700{% endif %}">
+        {% if qualidade.tem_delivery_check %}Delivery verificado{% else %}Delivery pendente{% endif %}
+    </span>
+    <span class="badge {% if qualidade.tem_contato %}bg-emerald-100 text-emerald-700{% else %}bg-slate-100 text-slate-500{% endif %}">
+        {% if qualidade.tem_contato %}Contato{% else %}Sem contato{% endif %}
+    </span>
+    <span class="badge {% if qualidade.tem_socios %}bg-emerald-100 text-emerald-700{% else %}bg-slate-100 text-slate-500{% endif %}">
+        {% if qualidade.tem_socios %}Sócios{% else %}Sem sócios{% endif %}
+    </span>
+    <span class="badge bg-{% if qualidade.nivel == 'completo' %}emerald{% elif qualidade.nivel == 'parcial' %}blue{% else %}amber{% endif %}-100 text-{% if qualidade.nivel == 'completo' %}emerald{% elif qualidade.nivel == 'parcial' %}blue{% else %}amber{% endif %}-700">
+        Dados: {{ qualidade.nivel|capitalize }}
+    </span>
+</div>
+
+<!-- Warnings -->
+{% if not qualidade.tem_maps %}
+<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+    Dados do Google Maps indisponíveis. Templates que usam rating/avaliações não estão disponíveis.
+</div>
+{% endif %}
+{% if not qualidade.tem_delivery_check %}
+<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+    Verificação de delivery não realizada para {{ lead.cidade }}/{{ lead.uf }}. Dados de concorrentes podem estar incompletos.
+</div>
+{% endif %}
+
 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
     <!-- WhatsApp -->
     <div class="card">
@@ -274,14 +306,15 @@
         {% if lead.telefone1 or lead.telefone_proprietario %}
         <div class="space-y-3">
             {% if lead.telefone1 %}
-            <a href="/whatsapp/enviar/{{ lead.id }}?template=primeiro_contato" target="_blank"
+            <a href="/whatsapp/enviar/{{ lead.id }}?template={{ template_recomendado }}" target="_blank"
                class="btn btn-success w-full">
                 <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.625.846 5.059 2.284 7.034L.789 23.444l4.577-1.472A11.94 11.94 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-2.239 0-4.308-.724-5.993-1.953l-.427-.305-2.718.874.853-2.635-.333-.453A9.96 9.96 0 012 12C2 6.477 6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/></svg>
                 Enviar WhatsApp
             </a>
+            <p class="text-xs text-slate-400 text-center">Template: {{ template_recomendado|replace('_', ' ')|title }}</p>
             {% endif %}
             {% if lead.telefone_proprietario %}
-            <a href="/whatsapp/enviar/{{ lead.id }}?template=primeiro_contato&tel=proprietario" target="_blank"
+            <a href="/whatsapp/enviar/{{ lead.id }}?template={{ template_recomendado }}&tel=proprietario" target="_blank"
                class="btn btn-secondary w-full">Tel. Proprietário</a>
             {% endif %}
         </div>

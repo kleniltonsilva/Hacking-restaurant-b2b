@@ -165,6 +165,15 @@ CREATE TABLE IF NOT EXISTS lead_sequencia (
 );
 
 -- ============================================================
+-- CONFIGURAÇÕES DO SISTEMA
+-- ============================================================
+CREATE TABLE IF NOT EXISTS configuracoes (
+    chave VARCHAR(100) PRIMARY KEY,
+    valor TEXT,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- ============================================================
 -- ÍNDICES
 -- ============================================================
 

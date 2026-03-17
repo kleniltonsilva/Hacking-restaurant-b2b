@@ -18,6 +18,9 @@ from config import (
     GMAPS_DIRECTED_RETRY_BACKOFF, GMAPS_DIRECTED_SCORE_MINIMO,
     GMAPS_DIRECTED_TIMEOUT, BROWSER_SESSION_LIMIT,
 )
+
+# Score mínimo para fallback por nome (v4.2)
+GMAPS_DIRECTED_NOME_SCORE_MINIMO = 0.70
 from logger import log
 from browser_manager import (
     criar_browser as bm_criar_browser, fechar_browser,
@@ -654,9 +657,10 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
     """
     Busca um CNPJ especifico no Maps usando queries geradas.
     Tenta cada query, verifica score de endereco.
+    v4.2: Fallback por nome quando score de endereco e baixo.
     Retorna dados do Maps + score ou {} se nao encontrou.
     """
-    from address_matcher import calcular_score_endereco
+    from address_matcher import calcular_score_endereco, calcular_score_nome
 
     queries = _construir_queries_maps(cnpj_data)
     cnpj = cnpj_data.get("cnpj", "???")
@@ -664,10 +668,41 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
     numero = cnpj_data.get("numero", "") or ""
     bairro = cnpj_data.get("bairro", "") or ""
     cidade_cnpj = (cnpj_data.get("cidade", "") or "").upper()
+    nome_fantasia = cnpj_data.get("nome_fantasia", "") or ""
+    razao_social = cnpj_data.get("razao_social", "") or ""
 
     if not queries:
         log.warning(f"[MAPS-DIR] ⚠️ {cnpj}: sem queries possiveis")
         return {}
+
+    # v4.2: Rastrear melhor candidato por nome durante o loop
+    melhor_candidato_nome = None
+    melhor_score_nome = 0.0
+
+    def _verificar_cidade(dados):
+        """Verifica se o resultado e da mesma cidade."""
+        if not cidade_cnpj:
+            return True
+        endereco_upper = dados.get("endereco", "").upper()
+        if cidade_cnpj.replace(" ", "") in endereco_upper.replace(" ", ""):
+            return True
+        cidade_title = cnpj_data.get("cidade", "").title()
+        if cidade_title in dados.get("endereco", ""):
+            return True
+        return False
+
+    def _avaliar_candidato_nome(dados):
+        """Avalia um candidato para fallback por nome."""
+        nonlocal melhor_candidato_nome, melhor_score_nome
+        if not dados.get("nome"):
+            return
+        if not _verificar_cidade(dados):
+            return
+        score_n = calcular_score_nome(dados["nome"], nome_fantasia, razao_social)
+        if score_n >= GMAPS_DIRECTED_NOME_SCORE_MINIMO and score_n > melhor_score_nome:
+            melhor_score_nome = score_n
+            melhor_candidato_nome = dados.copy()
+            melhor_candidato_nome["score_nome"] = score_n
 
     for qi, query in enumerate(queries):
         try:
@@ -684,14 +719,9 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
                 # Resultado unico - extrair diretamente
                 dados = await _extrair_detalhes_lugar(page)
                 if dados["nome"] and dados["endereco"]:
-                    # Verificar se e da mesma cidade
-                    endereco_upper = dados["endereco"].upper()
-                    if cidade_cnpj and cidade_cnpj.replace(" ", "") not in endereco_upper.replace(" ", ""):
-                        # Tentar com cidade title case
-                        cidade_title = cnpj_data.get("cidade", "").title()
-                        if cidade_title not in dados["endereco"]:
-                            log.info(f"[MAPS-DIR] ⏭️ {cnpj} q{qi+1}: resultado de outra cidade")
-                            continue
+                    if not _verificar_cidade(dados):
+                        log.info(f"[MAPS-DIR] ⏭️ {cnpj} q{qi+1}: resultado de outra cidade")
+                        continue
 
                     score = calcular_score_endereco(
                         dados["endereco"], logradouro,
@@ -699,10 +729,13 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
                     )
                     if score >= GMAPS_DIRECTED_SCORE_MINIMO:
                         dados["score_match"] = score
+                        dados["match_tipo"] = "endereco"
                         log.info(f"[MAPS-DIR] 🟢 {cnpj}: {dados['nome'][:35]} (score={score:.2f}, q{qi+1})")
                         return dados
                     else:
                         log.info(f"[MAPS-DIR] 🟡 {cnpj} q{qi+1}: score baixo ({score:.2f}) - {dados['nome'][:30]}")
+                        # v4.2: Avaliar como candidato por nome
+                        _avaliar_candidato_nome(dados)
             else:
                 # Lista de resultados - tentar os 3 primeiros
                 await asyncio.sleep(random.uniform(1, 3))
@@ -736,6 +769,9 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
                                 melhor_dados = dados.copy()
                                 melhor_dados["score_match"] = score
 
+                            # v4.2: Avaliar como candidato por nome
+                            _avaliar_candidato_nome(dados)
+
                         # Voltar para lista
                         await page.keyboard.press("Escape")
                         await asyncio.sleep(random.uniform(0.5, 1))
@@ -749,6 +785,7 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
                             pass
 
                 if melhor_dados and melhor_score >= GMAPS_DIRECTED_SCORE_MINIMO:
+                    melhor_dados["match_tipo"] = "endereco"
                     log.info(f"[MAPS-DIR] 🟢 {cnpj}: {melhor_dados['nome'][:35]} (score={melhor_score:.2f}, q{qi+1})")
                     return melhor_dados
                 elif melhor_score > 0:
@@ -756,6 +793,14 @@ async def _buscar_cnpj_no_maps(page, cnpj_data: dict) -> dict:
 
         except Exception as e:
             log.warning(f"[MAPS-DIR] ⚠️ {cnpj} q{qi+1}: {e}")
+
+    # v4.2: Fallback por nome — aceitar candidato se endereco falhou
+    if melhor_candidato_nome and melhor_score_nome >= GMAPS_DIRECTED_NOME_SCORE_MINIMO:
+        melhor_candidato_nome["score_match"] = melhor_score_nome
+        melhor_candidato_nome["match_tipo"] = "nome"
+        log.info(f"[MAPS-DIR] 🔵 {cnpj}: FALLBACK POR NOME — {melhor_candidato_nome['nome'][:35]} "
+                 f"(score_nome={melhor_score_nome:.2f})")
+        return melhor_candidato_nome
 
     log.info(f"[MAPS-DIR] 🔴 {cnpj}: nao encontrado no Maps")
     return {}

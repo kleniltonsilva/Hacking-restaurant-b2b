@@ -264,6 +264,83 @@ def calcular_score_endereco(endereco_maps: str, endereco_receita: str,
 
 
 # ============================================================
+# SIMILARIDADE DE NOMES (Fallback Maps v4.2)
+# ============================================================
+
+# Sufixos jurídicos e stopwords para nomes de restaurantes
+_SUFIXOS_JURIDICOS = re.compile(
+    r'\s*(LTDA|ME|EIRELI|S/?A|EPP|SLU|SS|EMPRESA INDIVIDUAL|'
+    r'SOCIEDADE SIMPLES|MICROEMPRESA|MICRO EMPRESA)\s*\.?\s*$',
+    re.IGNORECASE
+)
+
+_STOPWORDS_NOME = {
+    "restaurante", "restaurantes", "lanchonete",
+    "delivery", "express", "gourmet",
+    "de", "da", "do", "das", "dos", "e", "a", "o",
+}
+
+
+def _normalizar_nome_restaurante(nome: str) -> str:
+    """Normaliza nome de restaurante para comparação.
+    Remove acentos, sufixos jurídicos, pontuação, stopwords comuns."""
+    if not nome:
+        return ""
+    texto = remover_acentos(nome.lower().strip())
+    # Remover sufixos jurídicos
+    texto = _SUFIXOS_JURIDICOS.sub("", texto).strip()
+    # Remover pontuação
+    texto = re.sub(r'[,.\-/\\;:()"\'\#\*&]', " ", texto)
+    # Remover stopwords de nomes
+    palavras = texto.split()
+    palavras = [p for p in palavras if p not in _STOPWORDS_NOME and len(p) > 1]
+    return " ".join(palavras).strip()
+
+
+def calcular_score_nome(nome_maps: str, nome_fantasia: str, razao_social: str = "") -> float:
+    """Calcula score de similaridade entre nome do Maps e nome da Receita.
+    Compara com nome_fantasia e razão_social, retorna o melhor.
+    Score mínimo recomendado: 0.70"""
+    if not nome_maps:
+        return 0.0
+    if not nome_fantasia and not razao_social:
+        return 0.0
+
+    maps_norm = _normalizar_nome_restaurante(nome_maps)
+    if not maps_norm:
+        return 0.0
+
+    melhor = 0.0
+
+    for nome_ref in [nome_fantasia, razao_social]:
+        if not nome_ref:
+            continue
+        ref_norm = _normalizar_nome_restaurante(nome_ref)
+        if not ref_norm:
+            continue
+
+        # Similaridade SequenceMatcher
+        score = SequenceMatcher(None, maps_norm, ref_norm).ratio()
+
+        # Bonus se um contém o outro (proporção mínima de 50% do maior)
+        menor = min(len(maps_norm), len(ref_norm))
+        maior = max(len(maps_norm), len(ref_norm))
+        if menor > 0 and maior > 0 and menor / maior >= 0.5:
+            if maps_norm in ref_norm or ref_norm in maps_norm:
+                score = max(score, 0.85)
+
+        # Bonus se as palavras são iguais (ordem diferente)
+        set_maps = set(maps_norm.split())
+        set_ref = set(ref_norm.split())
+        if set_maps and set_ref and set_maps == set_ref:
+            score = max(score, 0.95)
+
+        melhor = max(melhor, score)
+
+    return round(melhor, 4)
+
+
+# ============================================================
 # CRUZAMENTO: RESTAURANTES × CNPJs DA RECEITA
 # ============================================================
 
@@ -630,6 +707,26 @@ def testar_similaridade():
         print()
 
     print(f"Acurácia: {acertos}/{len(testes)} ({acertos/len(testes)*100:.0f}%)")
+
+    # Testes de similaridade de nomes (v4.2)
+    print("\n═══ TESTE DE SIMILARIDADE DE NOMES ═══\n")
+
+    testes_nome = [
+        # (nome_maps, nome_fantasia, razao_social, score_esperado_minimo)
+        ("Palmas Pizzaria", "PALMAS PIZZAS", "", 0.70),
+        ("Palmas Pizzas", "PALMAS PIZZAS", "", 0.90),
+        ("Restaurante Sabor do Norte", "SABOR DO NORTE", "", 0.80),
+        ("Cantina Italiana", "CANTINA ITALIANA LTDA", "", 0.80),
+        ("Bar do Zé", "", "ZE ANTONIO SILVA ME", 0.0),  # Não deve dar match
+        ("Sushi Kazu", "SUSHI KAZU", "KAZU ALIMENTOS LTDA", 0.90),
+    ]
+
+    for nome_maps, fantasia, razao, min_esperado in testes_nome:
+        score = calcular_score_nome(nome_maps, fantasia, razao)
+        ok = score >= min_esperado
+        emoji = "OK" if ok else "FAIL"
+        print(f"  [{emoji}] score={score:.2f} (min={min_esperado:.2f}) "
+              f"| Maps: '{nome_maps}' vs RF: '{fantasia or razao}'")
 
 
 if __name__ == "__main__":

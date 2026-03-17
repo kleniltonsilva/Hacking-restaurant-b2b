@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Configurações — Derekh CRM{% endblock %}
+{% block page_title %}Configurações{% endblock %}
+
+{% block content %}
+{% if salvo %}
+<div class="mb-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+    Configurações salvas com sucesso.
+</div>
+{% endif %}
+
+<div class="max-w-2xl">
+    <div class="card">
+        <h3 class="text-sm font-semibold text-slate-700 mb-4">Dados do Utilizador</h3>
+        <p class="text-xs text-slate-500 mb-6">Estas informações são usadas nos templates de WhatsApp e Email para personalizar as mensagens.</p>
+
+        <form method="post" action="/api/configuracoes" class="space-y-5">
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Nome</label>
+                <input type="text" name="nome_usuario" class="input" value="{{ configs.get('nome_usuario', '') }}" placeholder="Ex: João Silva">
+                <p class="text-xs text-slate-400 mt-1">Substitui <code>{nome_usuario}</code> nos templates</p>
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Empresa</label>
+                <input type="text" name="empresa" class="input" value="{{ configs.get('empresa', '') }}" placeholder="Ex: Derekh Food">
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Cargo</label>
+                <input type="text" name="cargo" class="input" value="{{ configs.get('cargo', '') }}" placeholder="Ex: Consultor Comercial">
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Telefone</label>
+                <input type="text" name="telefone_usuario" class="input" value="{{ configs.get('telefone_usuario', '') }}" placeholder="Ex: (11) 99999-9999">
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-slate-500 mb-1">Email</label>
+                <input type="email" name="email_usuario" class="input" value="{{ configs.get('email_usuario', '') }}" placeholder="Ex: joao@derekh.com.br">
+            </div>
+
+            <div class="pt-2">
+                <button type="submit" class="btn btn-primary">Salvar Configurações</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -29,6 +29,8 @@ from crm.database import (
     atualizar_status_campanha,
     listar_sequencias, obter_sequencia, criar_sequencia,
     adicionar_etapa_sequencia, inscrever_leads_sequencia,
+    obter_configuracoes_todas, salvar_configuracao,
+    cidade_tem_delivery_verificado,
 )
 from crm.models import (
     PIPELINE_STATUS, PIPELINE_LABELS, PIPELINE_CORES,
@@ -218,6 +220,8 @@ async def api_cidades(uf: str = ""):
 
 @app.get("/lead/{lead_id}", response_class=HTMLResponse)
 async def ficha_lead(request: Request, lead_id: int, tab: str = "dados"):
+    from crm.scoring import avaliar_qualidade_dados
+
     lead = obter_lead(lead_id)
     if not lead:
         return HTMLResponse("<h1>Lead não encontrado</h1>", status_code=404)
@@ -225,12 +229,26 @@ async def ficha_lead(request: Request, lead_id: int, tab: str = "dados"):
     interacoes = obter_interacoes_lead(lead_id)
     socios = obter_socios_lead(lead_id)
 
+    # Qualidade de dados para tab Ações
+    cidade = lead.get("cidade") or ""
+    uf = lead.get("uf") or ""
+    delivery_ok = cidade_tem_delivery_verificado(cidade, uf) if cidade and uf else False
+    qualidade = avaliar_qualidade_dados(lead, delivery_ok)
+
+    # Template recomendado baseado na qualidade
+    if qualidade["tem_maps"]:
+        template_recomendado = "primeiro_contato"
+    else:
+        template_recomendado = "primeiro_contato_basico"
+
     return templates.TemplateResponse("ficha.html", {
         "request": request,
         "lead": lead,
         "interacoes": interacoes,
         "socios": socios,
         "tab": tab,
+        "qualidade": qualidade,
+        "template_recomendado": template_recomendado,
         "pipeline_status": PIPELINE_STATUS,
         "pipeline_labels": PIPELINE_LABELS,
         "tipos_interacao": TIPOS_INTERACAO,
@@ -453,6 +471,10 @@ async def api_gerar_whatsapp(
 ):
     from crm.whatsapp_service import gerar_link_whatsapp
     resultado = gerar_link_whatsapp(lead_id, template, tel_proprietario)
+    if resultado.get("erro") and resultado.get("template_sugerido"):
+        return JSONResponse(resultado, status_code=422)
+    if resultado.get("erro"):
+        return JSONResponse(resultado, status_code=400)
     return JSONResponse(resultado)
 
 
@@ -527,6 +549,40 @@ async def api_enviar_email_lead(lead_id: int, template_id: int = Form(...)):
 async def api_preview_email(template_id: int, lead_id: int):
     from crm.email_service import preview_template
     return JSONResponse(preview_template(template_id, lead_id))
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+@app.get("/configuracoes", response_class=HTMLResponse)
+async def configuracoes_page(request: Request, salvo: str = ""):
+    configs = obter_configuracoes_todas()
+    return templates.TemplateResponse("configuracoes.html", {
+        "request": request,
+        "configs": configs,
+        "salvo": salvo == "1",
+        "pagina_ativa": "configuracoes",
+    })
+
+
+@app.post("/api/configuracoes")
+async def api_salvar_configuracoes(
+    nome_usuario: str = Form(""),
+    empresa: str = Form(""),
+    cargo: str = Form(""),
+    telefone_usuario: str = Form(""),
+    email_usuario: str = Form(""),
+):
+    for chave, valor in [
+        ("nome_usuario", nome_usuario),
+        ("empresa", empresa),
+        ("cargo", cargo),
+        ("telefone_usuario", telefone_usuario),
+        ("email_usuario", email_usuario),
+    ]:
+        salvar_configuracao(chave, valor.strip())
+    return RedirectResponse("/configuracoes?salvo=1", status_code=303)
 
 
 # ============================================================

@@ -224,6 +224,45 @@ def personalizar_abordagem(lead: dict) -> dict:
     return resultado
 
 
+def avaliar_qualidade_dados(lead: dict, delivery_verificado: bool = False) -> dict:
+    """Avalia qualidade dos dados disponíveis de um lead.
+    Retorna dict com nivel (completo/parcial/basico) e flags individuais."""
+    tem_maps = bool(lead.get("rating") and lead.get("nome_maps"))
+    tem_delivery_check = delivery_verificado
+    tem_contato = bool(lead.get("email") or lead.get("telefone1"))
+    tem_telefone = bool(lead.get("telefone1") or lead.get("telefone_proprietario"))
+    tem_email = bool(lead.get("email") and lead["email"].strip())
+    tem_socios = False
+    socios_json = lead.get("socios_json")
+    if socios_json:
+        try:
+            if isinstance(socios_json, str):
+                socios = json.loads(socios_json)
+            else:
+                socios = socios_json
+            tem_socios = isinstance(socios, list) and len(socios) > 0
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Determinar nivel
+    if tem_maps and tem_contato and tem_socios:
+        nivel = "completo"
+    elif tem_maps or (tem_contato and tem_socios):
+        nivel = "parcial"
+    else:
+        nivel = "basico"
+
+    return {
+        "nivel": nivel,
+        "tem_maps": tem_maps,
+        "tem_delivery_check": tem_delivery_check,
+        "tem_contato": tem_contato,
+        "tem_telefone": tem_telefone,
+        "tem_email": tem_email,
+        "tem_socios": tem_socios,
+    }
+
+
 def _formatar_nome(nome: str) -> str:
     """Formata nome para título (primeira letra maiúscula)."""
     if not nome:

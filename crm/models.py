@@ -125,19 +125,32 @@ CONDICOES_ETAPA_LABELS = {
 WHATSAPP_TEMPLATES = {
     "primeiro_contato": {
         "nome": "Primeiro Contato",
+        "requer": ["tem_maps"],
         "mensagem": (
-            "Olá {nome_dono}! Tudo bem? 👋\n\n"
-            "Me chamo [SEU NOME] da Derekh Food. "
+            "Olá {nome_dono}! Tudo bem?\n\n"
+            "Me chamo {nome_usuario} da Derekh Food. "
             "Vi que o *{nome_restaurante}* tem {rating} estrelas e {total_avaliacoes} avaliações — parabéns pelo trabalho!\n\n"
             "A Derekh ajuda restaurantes como o seu a vender mais através de delivery próprio, "
             "sem pagar comissões de 27% para iFood.\n\n"
             "Posso te mostrar como funciona em 5 minutos?"
         ),
     },
+    "primeiro_contato_basico": {
+        "nome": "Primeiro Contato (Básico)",
+        "requer": [],
+        "mensagem": (
+            "Olá {nome_dono}! Tudo bem?\n\n"
+            "Me chamo {nome_usuario} da Derekh Food. Trabalho com restaurantes em {cidade} "
+            "e vi que o *{nome_restaurante}* tem tudo para crescer com delivery próprio.\n\n"
+            "A Derekh ajuda restaurantes como o seu a vender mais, sem pagar comissões de 27%.\n\n"
+            "Posso te mostrar como funciona em 5 minutos?"
+        ),
+    },
     "sem_delivery": {
         "nome": "Sem Delivery",
+        "requer": ["tem_delivery_check"],
         "mensagem": (
-            "Olá {nome_dono}! 👋\n\n"
+            "Olá {nome_dono}!\n\n"
             "Percebi que o *{nome_restaurante}* ainda não está em plataformas de delivery. "
             "Sabia que restaurantes com delivery próprio faturam em média 30% a mais?\n\n"
             "A Derekh Food cria seu delivery em 48h, sem comissões abusivas.\n\n"
@@ -146,8 +159,9 @@ WHATSAPP_TEMPLATES = {
     },
     "com_ifood": {
         "nome": "Já tem iFood",
+        "requer": ["tem_delivery_check"],
         "mensagem": (
-            "Olá {nome_dono}! 👋\n\n"
+            "Olá {nome_dono}!\n\n"
             "Vi que o *{nome_restaurante}* já está no iFood. "
             "A Derekh funciona como complemento — seu delivery próprio, sua marca, suas regras.\n\n"
             "Sem comissão de 27%. O pedido vai direto pro seu caixa.\n\n"
@@ -156,6 +170,7 @@ WHATSAPP_TEMPLATES = {
     },
     "followup": {
         "nome": "Follow-up",
+        "requer": [],
         "mensagem": (
             "Oi {nome_dono}, tudo bem?\n\n"
             "Entrei em contato há alguns dias sobre o delivery próprio para o *{nome_restaurante}*.\n\n"

@@ -788,3 +788,48 @@ def buscar_interacao_por_email_id(email_message_id: str) -> Optional[dict]:
         """, (email_message_id,))
         row = cur.fetchone()
         return dict(row) if row else None
+
+
+# ============================================================
+# CONFIGURAÇÕES DO SISTEMA
+# ============================================================
+
+def obter_configuracao(chave: str) -> Optional[str]:
+    """Retorna valor de uma configuração ou None."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT valor FROM configuracoes WHERE chave = %s", (chave,))
+        row = cur.fetchone()
+        return row["valor"] if row else None
+
+
+def obter_configuracoes_todas() -> dict:
+    """Retorna todas as configurações como dict {chave: valor}."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT chave, valor FROM configuracoes")
+        return {r["chave"]: r["valor"] for r in cur.fetchall()}
+
+
+def salvar_configuracao(chave: str, valor: str):
+    """UPSERT de uma configuração."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO configuracoes (chave, valor, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = NOW()
+        """, (chave, valor))
+        conn.commit()
+
+
+def cidade_tem_delivery_verificado(cidade: str, uf: str) -> bool:
+    """Verifica se pelo menos 1 lead da cidade tem delivery verificado (tem_ifood=1 ou tem_rappi=1 ou tem_99food=1)."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) as c FROM leads
+            WHERE cidade = %s AND uf = %s
+            AND (tem_ifood = 1 OR tem_rappi = 1 OR tem_99food = 1)
+        """, (cidade.upper(), uf.upper()))
+        return cur.fetchone()["c"] > 0

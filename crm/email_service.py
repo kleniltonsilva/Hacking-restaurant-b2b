@@ -15,6 +15,7 @@ from crm.database import (
     atualizar_campanha_contadores, atualizar_status_campanha,
     buscar_leads_para_export, marcar_email_invalido,
     buscar_interacao_por_email_id,
+    obter_configuracao, cidade_tem_delivery_verificado,
 )
 from crm.scoring import personalizar_abordagem
 from crm.competitor_service import dados_mercado_cidade, concorrentes_bairro
@@ -38,9 +39,13 @@ def _extrair_variaveis(lead: dict) -> dict:
     uf = lead.get("uf") or ""
     bairro = lead.get("bairro") or ""
 
+    # Buscar nome_usuario das configurações
+    nome_usuario = obter_configuracao("nome_usuario") or "Equipe Derekh"
+
     vars = {
         "nome_dono": personalizacao["nome_dono"] or "prezado(a)",
         "nome_restaurante": lead.get("nome_fantasia") or lead.get("razao_social") or "seu restaurante",
+        "nome_usuario": nome_usuario,
         "razao_social": lead.get("razao_social") or "",
         "cidade": cidade,
         "uf": uf,
@@ -55,29 +60,36 @@ def _extrair_variaveis(lead: dict) -> dict:
     # Dados de mercado da cidade
     if cidade and uf:
         try:
+            # Verificar se delivery foi verificado antes de mostrar concorrentes
+            delivery_verificado = cidade_tem_delivery_verificado(cidade, uf)
+
             mercado = dados_mercado_cidade(cidade, uf)
             vars["total_restaurantes_cidade"] = str(mercado.get("total_restaurantes", 0))
             vars["total_com_delivery_cidade"] = str(mercado.get("com_algum_delivery", 0))
             vars["total_sem_delivery_cidade"] = str(mercado.get("sem_delivery", 0))
             vars["total_ifood_cidade"] = str(mercado.get("com_ifood", 0))
 
-            # Concorrentes do bairro com delivery
-            concorrentes = concorrentes_bairro(lead.get("id", 0), limite=5)
-            if concorrentes:
-                lista_html = ""
-                for c in concorrentes:
-                    nome = c.get("nome_fantasia") or c.get("razao_social") or "—"
-                    plataformas = []
-                    if c.get("tem_ifood"): plataformas.append("iFood")
-                    if c.get("tem_rappi"): plataformas.append("Rappi")
-                    if c.get("tem_99food"): plataformas.append("99Food")
-                    rating_str = f" | {c['rating']}★" if c.get("rating") else ""
-                    lista_html += f'<li style="padding:4px 0;color:#374151;">{nome} — {", ".join(plataformas)}{rating_str}</li>'
-                vars["concorrentes_html"] = f'<ul style="list-style:none;padding:0;margin:8px 0;">{lista_html}</ul>'
-                vars["total_concorrentes_delivery"] = str(len(concorrentes))
+            if delivery_verificado:
+                # Concorrentes do bairro com delivery
+                concorrentes = concorrentes_bairro(lead.get("id", 0), limite=5)
+                if concorrentes:
+                    lista_html = ""
+                    for c in concorrentes:
+                        nome = c.get("nome_fantasia") or c.get("razao_social") or "—"
+                        plataformas = []
+                        if c.get("tem_ifood"): plataformas.append("iFood")
+                        if c.get("tem_rappi"): plataformas.append("Rappi")
+                        if c.get("tem_99food"): plataformas.append("99Food")
+                        rating_str = f" | {c['rating']}★" if c.get("rating") else ""
+                        lista_html += f'<li style="padding:4px 0;color:#374151;">{nome} — {", ".join(plataformas)}{rating_str}</li>'
+                    vars["concorrentes_html"] = f'<ul style="list-style:none;padding:0;margin:8px 0;">{lista_html}</ul>'
+                    vars["total_concorrentes_delivery"] = str(len(concorrentes))
+                else:
+                    vars["concorrentes_html"] = '<p style="color:#6b7280;">Nenhum concorrente com delivery encontrado no bairro.</p>'
+                    vars["total_concorrentes_delivery"] = "0"
             else:
-                vars["concorrentes_html"] = '<p style="color:#6b7280;">Dados de concorrentes sendo atualizados.</p>'
-                vars["total_concorrentes_delivery"] = "0"
+                vars["concorrentes_html"] = '<p style="color:#6b7280;">Verificação de delivery pendente para esta cidade.</p>'
+                vars["total_concorrentes_delivery"] = "—"
         except Exception:
             vars["total_restaurantes_cidade"] = "—"
             vars["total_com_delivery_cidade"] = "—"
