@@ -32,3 +32,8 @@ env/
 
 # Playwright
 playwright-report/
+
+# ==============================
+# Project Documentation (Confidential)
+# ==============================
+CLAUDE.md
